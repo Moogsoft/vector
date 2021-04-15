@@ -308,11 +308,6 @@ jobs:
       - deb-verify
       - rpm-verify
       - osx-verify
-      - release-docker
-      - release-s3
-      - release-cloudsmith
-      - release-github
-      - release-helm
     runs-on: ubuntu-20.04
     steps:
       - run: echo Failed
