@@ -8,8 +8,6 @@ on:
     branches:
       - fix_release_action
 
-
-
 env:
   AUTOINSTALL: true
   VERBOSE: true
@@ -219,7 +217,7 @@ jobs:
     runs-on: ubuntu-20.04
     strategy:
       matrix:
-        container: ["ubuntu:14.04","ubuntu:16.04","ubuntu:18.04","ubuntu:20.04","debian:8","debian:9","debian:10"]
+        container: ["ubuntu:16.04","ubuntu:18.04","ubuntu:20.04","debian:8","debian:9","debian:10"]
     container:
       image: ${{ matrix.container }}
     steps:
@@ -292,6 +290,88 @@ jobs:
           path: target/artifacts
       - run: |
           tar -xvf target/artifacts/vector-${{ env.VECTOR_VERSION }}-x86_64-apple-darwin.tar.gz && vector-x86_64-apple-darwin/bin/vector --version
+
+  release-s3:
+    runs-on: ubuntu-18.04
+    needs:
+      - build-x86_64-unknown-linux-gnu-packages
+      - build-x86_64-unknown-linux-musl-packages
+      - build-aarch64-unknown-linux-musl-packages
+      - build-aarch64-unknown-linux-gnu-packages
+      - build-x86_64-apple-darwin-packages
+      - build-x86_64-pc-windows-msvc-packages
+      - build-armv7-unknown-linux-musleabihf-packages
+      - build-armv7-unknown-linux-gnueabihf-packages
+      - deb-verify
+      - rpm-verify
+      - osx-verify
+    steps:
+      - uses: actions/checkout@v1
+      - run: echo VECTOR_VERSION=$(make version) >> $GITHUB_ENV
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-unknown-linux-musl.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-aarch64-unknown-linux-musl.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-aarch64-unknown-linux-gnu.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-armv7-unknown-linux-gnueabihf.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-armv7-unknown-linux-musleabihf.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-amd64.deb
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-arm64.deb
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-armhf.deb
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-apple-darwin.tar.gz
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-pc-windows-msvc.zip
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x64.msi
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-1.x86_64.rpm
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-1.aarch64.rpm
+          path: target/artifacts
+      - uses: actions/download-artifact@v2
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-1.armv7.rpm
+          path: target/artifacts
+      - env:
+          AWS_ACCESS_KEY_ID: "${{ secrets.CI_AWS_ACCESS_KEY_ID }}"
+          AWS_SECRET_ACCESS_KEY: "${{ secrets.CI_AWS_SECRET_ACCESS_KEY }}"
+        run: make release-s3
 
   release-failure:
     name: release-failure
