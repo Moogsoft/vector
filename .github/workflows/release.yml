@@ -6,7 +6,7 @@ on:
       - v0.*
       - v1.*
     branches:
-      - fix_release_action
+      - release
 
 env:
   AUTOINSTALL: true
