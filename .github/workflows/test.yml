@@ -4,8 +4,7 @@ on:
   pull_request: {}
   push:
     branches:
-      - master
-
+      - release
 env:
   AUTOINSTALL: true
   AWS_ACCESS_KEY_ID: "dummy"
@@ -85,6 +84,7 @@ jobs:
   # Then, modify the `cross-linux` job to run `test` instead of `build`.
   test-linux:
     name: Unit - x86_64-unknown-linux-gnu
+    continue-on-error: true
     runs-on: [self-hosted, linux, x64, general]
     needs: changes
     if: ${{ needs.changes.outputs.source == 'true' }}
@@ -294,25 +294,3 @@ jobs:
         with:
           command: check licenses
 
-  master-failure:
-    name: master-failure
-    if: failure() && github.ref == 'refs/heads/master'
-    needs:
-      - cancel-previous
-      - changes
-      - cross-linux
-      - test-misc
-      - test-linux
-      - test-mac
-      - test-windows
-      - test-vrl
-      - check-component-features
-      - checks
-    runs-on: ubuntu-20.04
-    steps:
-    - name: Discord notification
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@0.3.0
-      with:
-        args: "Master tests failed: <https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}>"
