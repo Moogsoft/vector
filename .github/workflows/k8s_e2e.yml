@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - release
     paths:
       - ".github/workflows/k8s_e2e.yml"
       - ".cargo/**"

@@ -1,9 +1,24 @@
 name: Integration Test Suite
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/integration-test.yml"
+      - ".cargo/**"
+      - "lib/**"
+      - "proto/**"
+      - "scripts/**"
+      - "skaffold/**"
+      - "src/**"
+      - "tests/**"
+      - "build.rs"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "rust-toolchain"
   push:
     branches:
-      - master
+      - release
     paths:
       - ".github/workflows/integration-test.yml"
       - ".cargo/**"
