@@ -24,6 +24,8 @@ mod downcase;
 mod encode_base64;
 #[cfg(feature = "encode_json")]
 mod encode_json;
+#[cfg(feature = "encode_logfmt")]
+mod encode_logfmt;
 #[cfg(feature = "ends_with")]
 mod ends_with;
 #[cfg(feature = "exists")]
@@ -88,6 +90,8 @@ mod log;
 mod log_util;
 #[cfg(feature = "match")]
 mod r#match;
+#[cfg(feature = "match_any")]
+mod match_any;
 #[cfg(feature = "md5")]
 mod md5;
 #[cfg(feature = "merge")]
@@ -128,6 +132,8 @@ mod parse_linux_authorization;
 mod parse_logfmt;
 #[cfg(feature = "parse_nginx_log")]
 mod parse_nginx_log;
+#[cfg(feature = "parse_query_string")]
+mod parse_query_string;
 #[cfg(feature = "parse_regex")]
 mod parse_regex;
 #[cfg(feature = "parse_regex_all")]
@@ -142,10 +148,8 @@ mod parse_tokens;
 mod parse_url;
 #[cfg(feature = "push")]
 mod push;
-//#[cfg(feature = "redact")]
-//mod redact;
-#[cfg(feature = "parse_query_string")]
-mod parse_query_string;
+#[cfg(feature = "redact")]
+mod redact;
 #[cfg(feature = "replace")]
 mod replace;
 #[cfg(feature = "round")]
@@ -229,6 +233,8 @@ pub use downcase::Downcase;
 pub use encode_base64::EncodeBase64;
 #[cfg(feature = "encode_json")]
 pub use encode_json::EncodeJson;
+#[cfg(feature = "encode_logfmt")]
+pub use encode_logfmt::EncodeLogfmt;
 #[cfg(feature = "ends_with")]
 pub use ends_with::EndsWith;
 #[cfg(feature = "exists")]
@@ -285,6 +291,8 @@ pub use join::Join;
 pub use length::Length;
 #[cfg(feature = "log")]
 pub use log::Log;
+#[cfg(feature = "match_any")]
+pub use match_any::MatchAny;
 #[cfg(feature = "merge")]
 pub use merge::Merge;
 #[cfg(feature = "now")]
@@ -341,8 +349,8 @@ pub use parse_url::ParseUrl;
 pub use push::Push;
 #[cfg(feature = "match")]
 pub use r#match::Match;
-//#[cfg(feature = "redact")]
-//pub use redact::Redact;
+#[cfg(feature = "redact")]
+pub use redact::Redact;
 #[cfg(feature = "replace")]
 pub use replace::Replace;
 #[cfg(feature = "round")]
@@ -420,6 +428,8 @@ pub fn all() -> Vec<Box<dyn vrl::Function>> {
         Box::new(EncodeBase64),
         #[cfg(feature = "encode_json")]
         Box::new(EncodeJson),
+        #[cfg(feature = "encode_logfmt")]
+        Box::new(EncodeLogfmt),
         #[cfg(feature = "ends_with")]
         Box::new(EndsWith),
         #[cfg(feature = "exists")]
@@ -478,6 +488,8 @@ pub fn all() -> Vec<Box<dyn vrl::Function>> {
         Box::new(Log),
         #[cfg(feature = "match")]
         Box::new(Match),
+        #[cfg(feature = "match")]
+        Box::new(MatchAny),
         #[cfg(feature = "md5")]
         Box::new(Md5),
         #[cfg(feature = "merge")]
@@ -538,8 +550,10 @@ pub fn all() -> Vec<Box<dyn vrl::Function>> {
         Box::new(Push),
         #[cfg(feature = "match")]
         Box::new(Match),
-        //#[cfg(feature = "redact")]
-        //Box::new(Redact),
+        #[cfg(feature = "match")]
+        Box::new(MatchAny),
+        #[cfg(feature = "redact")]
+        Box::new(Redact),
         #[cfg(feature = "replace")]
         Box::new(Replace),
         #[cfg(feature = "round")]

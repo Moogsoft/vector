@@ -52,6 +52,7 @@ default = [
     "downcase",
     "encode_base64",
     "encode_json",
+    "encode_logfmt",
     "ends_with",
     "exists",
     "flatten",
@@ -81,6 +82,7 @@ default = [
     "length",
     "log",
     "match",
+    "match_any",
     "md5",
     "merge",
     "now",
@@ -149,6 +151,7 @@ del = []
 downcase = []
 encode_base64 = ["base64"]
 encode_json = ["serde_json"]
+encode_logfmt = []
 ends_with = []
 exists = []
 flatten = []
@@ -178,6 +181,7 @@ join = []
 length = []
 log = ["tracing"]
 match = ["regex"]
+match_any = ["regex"]
 md5 = ["md-5", "hex"]
 merge = []
 now = ["chrono"]

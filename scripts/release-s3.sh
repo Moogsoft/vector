@@ -37,6 +37,15 @@ for f in "$td_latest"/*; do
 done
 ls "$td_latest"
 
+#
+# A helper function for verifying a published artifact.
+#
+verify_artifact() {
+  local URL="$1"
+  local FILENAME="$2"
+  echo "Verifying $URL"
+  cmp <(wget -qO- --retry-on-http-error=404 --wait 10 --tries "$VERIFY_RETRIES" "$URL") "$FILENAME"
+}
 
 #
 # Upload
@@ -79,4 +88,3 @@ fi
 
 rm -rf "$td"
 rm -rf "$td_nightly"
-rm -rf "$td_latest"

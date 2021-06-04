@@ -64,9 +64,9 @@ jobs:
     name: Integration - Linux, AWS
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -82,9 +82,9 @@ jobs:
     name: Integration - Linux, Clickhouse
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -99,9 +99,9 @@ jobs:
     name: Integration - Linux, Docker
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -117,9 +117,9 @@ jobs:
     name: Integration - Linux, ES
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -135,9 +135,9 @@ jobs:
     name: Integration - Linux, GCP
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -153,9 +153,9 @@ jobs:
     name: Integration - Linux, Humio
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -171,9 +171,9 @@ jobs:
     name: Integration - Linux, Influx
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -189,9 +189,9 @@ jobs:
     name: Integration - Linux, Kafka
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -207,9 +207,9 @@ jobs:
     name: Integration - Linux, Loki
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -225,9 +225,9 @@ jobs:
     name: Integration - Linux, MongoDB Metrics
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -243,9 +243,9 @@ jobs:
     name: Integration - Linux, NATS
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -261,9 +261,9 @@ jobs:
     name: Integration - Linux, Nginx Metrics
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -279,9 +279,9 @@ jobs:
     name: Integration - Linux, PostgreSQL Metrics
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -297,9 +297,9 @@ jobs:
     name: Integration - Linux, Prometheus
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -315,9 +315,9 @@ jobs:
     name: Integration - Linux, Pulsar
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry
@@ -333,9 +333,9 @@ jobs:
     name: Integration - Linux, Splunk
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
       - run: make ci-sweep
-      - uses: actions/cache@v2.1.5
+      - uses: actions/cache@v2.1.6
         with:
           path: |
             ~/.cargo/registry

@@ -1,8 +1,8 @@
 #[cfg(feature = "api")]
 use super::api;
 use super::{
-    compiler, default_data_dir, Config, GlobalOptions, HealthcheckOptions, SinkConfig, SinkOuter,
-    SourceConfig, TestDefinition, TransformConfig, TransformOuter,
+    compiler, default_data_dir, provider, Config, GlobalOptions, HealthcheckOptions, SinkConfig,
+    SinkOuter, SourceConfig, SourceOuter, TestDefinition, TransformConfig, TransformOuter,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -18,13 +18,14 @@ pub struct ConfigBuilder {
     #[serde(default)]
     pub healthchecks: HealthcheckOptions,
     #[serde(default)]
-    pub sources: IndexMap<String, Box<dyn SourceConfig>>,
+    pub sources: IndexMap<String, SourceOuter>,
     #[serde(default)]
     pub sinks: IndexMap<String, SinkOuter>,
     #[serde(default)]
     pub transforms: IndexMap<String, TransformOuter>,
     #[serde(default)]
     pub tests: Vec<TestDefinition>,
+    pub provider: Option<Box<dyn provider::ProviderConfig>>,
 }
 
 impl Clone for ConfigBuilder {
@@ -49,6 +50,7 @@ impl From<Config> for ConfigBuilder {
             sources: c.sources,
             sinks: c.sinks,
             transforms: c.transforms,
+            provider: None,
             tests: c.tests,
         }
     }
@@ -70,7 +72,7 @@ impl ConfigBuilder {
     }
 
     pub fn add_source<S: SourceConfig + 'static, T: Into<String>>(&mut self, name: T, source: S) {
-        self.sources.insert(name.into(), Box::new(source));
+        self.sources.insert(name.into(), SourceOuter::new(source));
     }
 
     pub fn add_sink<S: SinkConfig + 'static, T: Into<String>>(
@@ -107,6 +109,8 @@ impl ConfigBuilder {
         if let Err(error) = self.api.merge(with.api) {
             errors.push(error);
         }
+
+        self.provider = with.provider;
 
         if self.global.data_dir.is_none() || self.global.data_dir == default_data_dir() {
             self.global.data_dir = with.global.data_dir;
