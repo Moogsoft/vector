@@ -132,36 +132,26 @@ impl TryFrom<LogEvent> for MoogsoftMetric {
         let mut moogsoft_metric: MoogsoftMetric = Default::default();
         let mut is_valid = true;
 
-        if log.contains(METRIC) {
-            if let Some(value) = log.get(METRIC) {
-                moogsoft_metric.with_metric(value.to_string_lossy());
-            } else {
-                trace!("LogEvent cannot be converted as it is missing a metric name.");
-                is_valid = false;
-            }
+        if let Some(value) = log.get(METRIC) {
+            moogsoft_metric.with_metric(value.to_string_lossy());
         } else {
             trace!("LogEvent cannot be converted as it is missing a metric name.");
             is_valid = false;
         }
 
         if is_valid {
-            if log.contains(DATA) {
-                if let Some(value) = log.get(DATA) {
-                    match value {
-                        Value::Integer(data) => {
-                            moogsoft_metric.with_data(*data as f64);
-                        }
-                        Value::Float(data) => {
-                            moogsoft_metric.with_data(*data);
-                        }
-                        _ => {
-                            trace!("LogEvent cannot be converted as it has invalid data type.");
-                            is_valid = false;
-                        }
+            if let Some(value) = log.get(DATA) {
+                match value {
+                    Value::Integer(data) => {
+                        moogsoft_metric.with_data(*data as f64);
                     }
-                } else {
-                    trace!("LogEvent cannot be converted as it is missing a data value.");
-                    is_valid = false;
+                    Value::Float(data) => {
+                        moogsoft_metric.with_data(*data);
+                    }
+                    _ => {
+                        trace!("LogEvent cannot be converted as it has invalid data type.");
+                        is_valid = false;
+                    }
                 }
             } else {
                 trace!("LogEvent cannot be converted as it is missing a data value.");
@@ -170,11 +160,8 @@ impl TryFrom<LogEvent> for MoogsoftMetric {
         }
 
         if is_valid {
-            // Optional key field
-            if log.contains(KEY) {
-                if let Some(value) = log.get(KEY) {
-                    moogsoft_metric.with_key(value.to_string_lossy());
-                }
+            if let Some(value) = log.get(KEY) {
+                moogsoft_metric.with_key(value.to_string_lossy());
             }
         }
 
@@ -182,12 +169,10 @@ impl TryFrom<LogEvent> for MoogsoftMetric {
             let mut source_set = false;
             let source_fields = vec![SOURCE, log_schema().host_key()];
             for source_field in source_fields {
-                if log.contains(source_field) {
-                    if let Some(value) = log.get(source_field) {
-                        moogsoft_metric.with_source(value.to_string_lossy());
-                        source_set = true;
-                        break;
-                    }
+                if let Some(value) = log.get(source_field) {
+                    moogsoft_metric.with_source(value.to_string_lossy());
+                    source_set = true;
+                    break;
                 }
             }
 
@@ -205,27 +190,25 @@ impl TryFrom<LogEvent> for MoogsoftMetric {
             let mut time_set = false;
             let time_fields = vec![TIME, log_schema().timestamp_key()];
             for time_field in time_fields {
-                if log.contains(time_field) {
-                    if let Some(value) = log.get(time_field) {
-                        match value {
-                            Value::Integer(data) => {
-                                moogsoft_metric.with_time(*data);
-                                time_set = true;
-                                break;
-                            }
-                            Value::Timestamp(data) => {
-                                moogsoft_metric.with_time(data.timestamp());
-                                time_set = true;
-                                break;
-                            }
-                            _ => {
-                                trace!("LogEvent cannot be converted because one of the time fields is invalid.");
+                if let Some(value) = log.get(time_field) {
+                    match value {
+                        Value::Integer(data) => {
+                            moogsoft_metric.with_time(*data);
+                            time_set = true;
+                            break;
+                        }
+                        Value::Timestamp(data) => {
+                            moogsoft_metric.with_time(data.timestamp());
+                            time_set = true;
+                            break;
+                        }
+                        _ => {
+                            trace!("LogEvent cannot be converted because one of the time fields is invalid.");
 
-                                // Not really set but since we are discarding we don't need to set it
-                                time_set = true;
+                            // Not really set but since we are discarding we don't need to set it
+                            time_set = true;
 
-                                is_valid = false;
-                            }
+                            is_valid = false;
                         }
                     }
                 }
@@ -376,18 +359,9 @@ impl HttpSink for MoogsoftSinkConfig {
     type Output = Vec<u8>;
 
     fn encode_event(&self, event: Event) -> Option<EncodedEvent<Self::Input>> {
-        let body = match event {
+        match event {
             Event::Log(log) => encode_log_event(log),
             Event::Metric(metric) => encode_metric_event(metric),
-        };
-
-        if let Some(body) = body {
-            Some(EncodedEvent {
-                item: body,
-                metadata: None,
-            })
-        } else {
-            None
         }
     }
 
@@ -413,7 +387,7 @@ impl HttpSink for MoogsoftSinkConfig {
     }
 }
 
-fn encode_log_event(log: LogEvent) -> Option<Vec<u8>> {
+fn encode_log_event(log: LogEvent) -> Option<EncodedEvent<Vec<u8>>> {
     if let Ok(metric) = MoogsoftMetric::try_from(log) {
         encode_moogsoft_metric(metric)
     } else {
@@ -422,7 +396,7 @@ fn encode_log_event(log: LogEvent) -> Option<Vec<u8>> {
     }
 }
 
-fn encode_metric_event(metric: Metric) -> Option<Vec<u8>> {
+fn encode_metric_event(metric: Metric) -> Option<EncodedEvent<Vec<u8>>> {
     if let Ok(metric) = MoogsoftMetric::try_from(metric) {
         encode_moogsoft_metric(metric)
     } else {
@@ -431,7 +405,7 @@ fn encode_metric_event(metric: Metric) -> Option<Vec<u8>> {
     }
 }
 
-fn encode_moogsoft_metric(metric: MoogsoftMetric) -> Option<Vec<u8>> {
+fn encode_moogsoft_metric(metric: MoogsoftMetric) -> Option<EncodedEvent<Vec<u8>>> {
     let mut body = serde_json::to_vec(&metric)
         .map_err(|error| panic!("Unable to encode into JSON: {}", error))
         .ok()?;
@@ -441,7 +415,10 @@ fn encode_moogsoft_metric(metric: MoogsoftMetric) -> Option<Vec<u8>> {
         byte_size: body.len(),
     });
 
-    Some(body)
+    Some(EncodedEvent {
+        item: body,
+        metadata: None,
+    })
 }
 
 #[cfg(test)]
