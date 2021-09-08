@@ -837,17 +837,19 @@ dependencies = [
 
 [[package]]
 name = "bson"
-version = "1.2.2"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b6553abdb9d2d8f262f0b5bccf807321d5b7d1a12796bcede8e1f150e85f2e"
+checksum = "1dcc15cd0b9aff8e8326561dcf0bb6e56d0e559f3a4897f615b4a5075ab54c46"
 dependencies = [
+ "ahash",
  "base64 0.13.0",
  "chrono",
  "hex",
+ "indexmap",
  "lazy_static",
- "linked-hash-map",
- "rand 0.7.3",
+ "rand 0.8.4",
  "serde",
+ "serde_bytes",
  "serde_json",
  "uuid 0.8.2",
 ]
@@ -1530,6 +1532,16 @@ name = "crypto-mac"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4857fd85a0c34b3c3297875b747c1e02e06b6a0ea32dd892d8192b9ce0813ea6"
+dependencies = [
+ "generic-array 0.14.4",
+ "subtle",
+]
+
+[[package]]
+name = "crypto-mac"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1d1a86f49236c215f271d40892d5fc950490551400b02ef360692c29815c714"
 dependencies = [
  "generic-array 0.14.4",
  "subtle",
@@ -2822,7 +2834,17 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1441c6b1e930e2817404b5046f1f989899143a12bf92de603b69f4e0aee1e15"
 dependencies = [
- "crypto-mac",
+ "crypto-mac 0.10.0",
+ "digest 0.9.0",
+]
+
+[[package]]
+name = "hmac"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a2a2320eb7ec0ebe8da8f744d7812d9fc4cb4d09344ac01898dbcb6a20ae69b"
+dependencies = [
+ "crypto-mac 0.11.1",
  "digest 0.9.0",
 ]
 
@@ -4000,9 +4022,9 @@ checksum = "717e29a243b81f8130e31e24e04fb151b04a44b5a7d05370935f7d937e9de06d"
 
 [[package]]
 name = "mongodb"
-version = "2.0.0-alpha.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1264c64d5469f05c0201b939f971138bd385e7eb87eacdfd79f0c18b9eae7940"
+checksum = "2b465d2f8add538efbaa3f22ae63be191b871ca511413405a59b8247cf2f6ef9"
 dependencies = [
  "async-trait",
  "base64 0.13.0",
@@ -4010,16 +4032,18 @@ dependencies = [
  "bson",
  "chrono",
  "derivative 2.2.0",
- "futures 0.3.14",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-util",
  "hex",
- "hmac",
+ "hmac 0.11.0",
  "lazy_static",
  "md-5",
  "os_info",
- "pbkdf2 0.7.5",
+ "pbkdf2 0.8.0",
  "percent-encoding",
  "rand 0.8.4",
- "reqwest",
  "rustls 0.19.0",
  "serde",
  "serde_bytes",
@@ -4036,7 +4060,7 @@ dependencies = [
  "tokio-util",
  "trust-dns-proto",
  "trust-dns-resolver",
- "typed-builder 0.4.1",
+ "typed-builder 0.9.1",
  "uuid 0.8.2",
  "version_check 0.9.3",
  "webpki",
@@ -4566,16 +4590,16 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3b8c0d71734018084da0c0354193a5edfb81b20d2d57a92c5b154aefc554a4a"
 dependencies = [
- "crypto-mac",
+ "crypto-mac 0.10.0",
 ]
 
 [[package]]
 name = "pbkdf2"
-version = "0.7.5"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf916dd32dd26297907890d99dc2740e33f6bd9073965af4ccff2967962f5508"
+checksum = "d95f5254224e617595d2cc3cc73ff0a5eaf2637519e25f03388154e9378b6ffa"
 dependencies = [
- "crypto-mac",
+ "crypto-mac 0.11.1",
 ]
 
 [[package]]
@@ -4813,7 +4837,7 @@ dependencies = [
  "byteorder",
  "bytes 1.0.1",
  "fallible-iterator",
- "hmac",
+ "hmac 0.10.1",
  "md-5",
  "memchr",
  "rand 0.8.4",
@@ -5601,7 +5625,6 @@ dependencies = [
  "http",
  "http-body",
  "hyper",
- "hyper-rustls",
  "hyper-tls",
  "ipnet",
  "js-sys",
@@ -5611,18 +5634,15 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "rustls 0.19.0",
  "serde",
  "serde_json",
  "serde_urlencoded 0.7.0",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 0.21.1",
  "winreg 0.7.0",
 ]
 
@@ -5818,7 +5838,7 @@ dependencies = [
  "bytes 1.0.1",
  "futures 0.3.14",
  "hex",
- "hmac",
+ "hmac 0.10.1",
  "http",
  "hyper",
  "log",
@@ -6058,7 +6078,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8da492dab03f925d977776a0b7233d7b934d6dc2b94faead48928e2e9bacedb9"
 dependencies = [
- "hmac",
+ "hmac 0.10.1",
  "pbkdf2 0.6.0",
  "salsa20",
  "sha2",
@@ -7490,9 +7510,9 @@ dependencies = [
 
 [[package]]
 name = "typed-builder"
-version = "0.4.1"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfc955f27acc7a547f328f52f4a5a568986a31efec2fc6de865279f3995787b9"
+checksum = "78cea224ddd4282dfc40d1edabbd0c020a12e946e3a48e2c2b8f6ff167ad29fe"
 dependencies = [
  "proc-macro2 1.0.26",
  "quote 1.0.9",
@@ -7501,9 +7521,9 @@ dependencies = [
 
 [[package]]
 name = "typed-builder"
-version = "0.5.1"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78cea224ddd4282dfc40d1edabbd0c020a12e946e3a48e2c2b8f6ff167ad29fe"
+checksum = "a46ee5bd706ff79131be9c94e7edcb82b703c487766a114434e5790361cf08c5"
 dependencies = [
  "proc-macro2 1.0.26",
  "quote 1.0.9",
