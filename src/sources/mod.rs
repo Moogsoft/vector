@@ -69,6 +69,9 @@ pub mod vector;
 
 pub(crate) mod util;
 
+#[cfg(feature = "sources-docker_metrics")]
+mod docker_metrics;
+
 pub use vector_core::source::Source;
 
 /// Common build errors
