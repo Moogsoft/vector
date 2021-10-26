@@ -104,6 +104,8 @@ mod prometheus;
 mod pulsar;
 #[cfg(feature = "sinks-redis")]
 mod redis;
+#[cfg(feature = "sources-redis")]
+mod redis_metrics;
 #[cfg(feature = "transforms-reduce")]
 mod reduce;
 #[cfg(feature = "transforms-regex_parser")]
@@ -249,6 +251,8 @@ pub(crate) use self::prometheus::*;
 pub use self::pulsar::*;
 #[cfg(feature = "sinks-redis")]
 pub use self::redis::*;
+#[cfg(feature = "sources-redis")]
+pub(crate) use self::redis_metrics::*;
 #[cfg(feature = "transforms-reduce")]
 pub(crate) use self::reduce::*;
 #[cfg(feature = "transforms-regex_parser")]
@@ -311,6 +315,7 @@ macro_rules! emit {
     feature = "sinks-file",
 ))]
 mod file;
+pub mod moogsoft_provider;
 mod windows;
 
 const ELLIPSIS: &str = "[...]";

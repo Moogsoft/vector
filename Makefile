@@ -169,35 +169,35 @@ environment-push: environment-prepare ## Publish a new version of the container 
 build: check-build-tools
 build: export CFLAGS += -g0 -O3
 build: ## Build the project in release mode (Supports `ENVIRONMENT=true`)
-	${MAYBE_ENVIRONMENT_EXEC} cargo build --release --no-default-features --features ${DEFAULT_FEATURES}
+	${MAYBE_ENVIRONMENT_EXEC} cargo build --release --no-default-features --features ${DEFAULT_FEATURES} --bin collector
 	${MAYBE_ENVIRONMENT_COPY_ARTIFACTS}
 
 .PHONY: build-dev
 build-dev: ## Build the project in development mode (Supports `ENVIRONMENT=true`)
-	${MAYBE_ENVIRONMENT_EXEC} cargo build --no-default-features --features ${DEFAULT_FEATURES}
+	${MAYBE_ENVIRONMENT_EXEC} cargo build --no-default-features --features ${DEFAULT_FEATURES} --bin collector
 
 .PHONY: build-x86_64-unknown-linux-gnu
-build-x86_64-unknown-linux-gnu: target/x86_64-unknown-linux-gnu/release/vector ## Build a release binary for the x86_64-unknown-linux-gnu triple.
+build-x86_64-unknown-linux-gnu: target/x86_64-unknown-linux-gnu/release/collector ## Build a release binary for the x86_64-unknown-linux-gnu triple.
 	@echo "Output to ${<}"
 
 .PHONY: build-aarch64-unknown-linux-gnu
-build-aarch64-unknown-linux-gnu: target/aarch64-unknown-linux-gnu/release/vector ## Build a release binary for the aarch64-unknown-linux-gnu triple.
+build-aarch64-unknown-linux-gnu: target/aarch64-unknown-linux-gnu/release/collector ## Build a release binary for the aarch64-unknown-linux-gnu triple.
 	@echo "Output to ${<}"
 
 .PHONY: build-x86_64-unknown-linux-musl
-build-x86_64-unknown-linux-musl: target/x86_64-unknown-linux-musl/release/vector ## Build a release binary for the x86_64-unknown-linux-musl triple.
+build-x86_64-unknown-linux-musl: target/x86_64-unknown-linux-musl/release/collector ## Build a release binary for the x86_64-unknown-linux-musl triple.
 	@echo "Output to ${<}"
 
 .PHONY: build-aarch64-unknown-linux-musl
-build-aarch64-unknown-linux-musl: target/aarch64-unknown-linux-musl/release/vector ## Build a release binary for the aarch64-unknown-linux-musl triple.
+build-aarch64-unknown-linux-musl: target/aarch64-unknown-linux-musl/release/collector ## Build a release binary for the aarch64-unknown-linux-musl triple.
 	@echo "Output to ${<}"
 
 .PHONY: build-armv7-unknown-linux-gnueabihf
-build-armv7-unknown-linux-gnueabihf: target/armv7-unknown-linux-gnueabihf/release/vector ## Build a release binary for the armv7-unknown-linux-gnueabihf triple.
+build-armv7-unknown-linux-gnueabihf: target/armv7-unknown-linux-gnueabihf/release/collector ## Build a release binary for the armv7-unknown-linux-gnueabihf triple.
 	@echo "Output to ${<}"
 
 .PHONY: build-armv7-unknown-linux-musleabihf
-build-armv7-unknown-linux-musleabihf: target/armv7-unknown-linux-musleabihf/release/vector ## Build a release binary for the armv7-unknown-linux-musleabihf triple.
+build-armv7-unknown-linux-musleabihf: target/armv7-unknown-linux-musleabihf/release/collector ## Build a release binary for the armv7-unknown-linux-musleabihf triple.
 	@echo "Output to ${<}"
 
 .PHONY: build-graphql-schema
@@ -244,41 +244,46 @@ cross-%: cargo-install-cross
 		--no-default-features \
 		--features target-${TRIPLE}
 
-target/%/vector: export PAIR =$(subst /, ,$(@:target/%/vector=%))
-target/%/vector: export TRIPLE ?=$(word 1,${PAIR})
-target/%/vector: export PROFILE ?=$(word 2,${PAIR})
-target/%/vector: export CFLAGS += -g0 -O3
-target/%/vector: cargo-install-cross CARGO_HANDLES_FRESHNESS
+target/%/collector: export PAIR =$(subst /, ,$(@:target/%/collector=%))
+target/%/collector: export TRIPLE ?=$(word 1,${PAIR})
+target/%/collector: export PROFILE ?=$(word 2,${PAIR})
+target/%/collector: export CFLAGS += -g0 -O3
+target/%/collector: cargo-install-cross CARGO_HANDLES_FRESHNESS
 	$(MAKE) -k cross-image-${TRIPLE}
 	cross build \
 		$(if $(findstring release,$(PROFILE)),--release,) \
 		--target ${TRIPLE} \
 		--no-default-features \
-		--features target-${TRIPLE}
+		--features target-${TRIPLE} \
+		--bin collector
 
-target/%/vector.tar.gz: export PAIR =$(subst /, ,$(@:target/%/vector.tar.gz=%))
-target/%/vector.tar.gz: export TRIPLE ?=$(word 1,${PAIR})
-target/%/vector.tar.gz: export PROFILE ?=$(word 2,${PAIR})
-target/%/vector.tar.gz: target/%/vector CARGO_HANDLES_FRESHNESS
-	rm -rf target/scratch/vector-${TRIPLE} || true
-	mkdir -p target/scratch/vector-${TRIPLE}/bin target/scratch/vector-${TRIPLE}/etc
+target/%/collector.tar.gz: export PAIR =$(subst /, ,$(@:target/%/collector.tar.gz=%))
+target/%/collector.tar.gz: export TRIPLE ?=$(word 1,${PAIR})
+target/%/collector.tar.gz: export PROFILE ?=$(word 2,${PAIR})
+target/%/collector.tar.gz: target/%/collector CARGO_HANDLES_FRESHNESS
+	rm -rf target/scratch/collector-${TRIPLE} || true
+	mkdir -p target/scratch/collector-${TRIPLE}/bin target/scratch/collector-${TRIPLE}/etc
 	cp --recursive --force --verbose \
-		target/${TRIPLE}/${PROFILE}/vector \
-		target/scratch/vector-${TRIPLE}/bin/vector
+		target/${TRIPLE}/${PROFILE}/collector \
+		target/scratch/collector-${TRIPLE}/bin/collector
 	cp --recursive --force --verbose \
 		README.md \
+		MOOGSOFT_README.txt \
+		MOOGSOFT_NOTICE \
 		LICENSE \
+		MOOGSOFT_LICENSE \
+		licenses \
 		config \
-		target/scratch/vector-${TRIPLE}/
+		target/scratch/collector-${TRIPLE}/
 	cp --recursive --force --verbose \
 		distribution/systemd \
-		target/scratch/vector-${TRIPLE}/etc/
+		target/scratch/collector-${TRIPLE}/etc/
 	tar --create \
 		--gzip \
 		--verbose \
-		--file target/${TRIPLE}/${PROFILE}/vector.tar.gz \
+		--file target/${TRIPLE}/${PROFILE}/collector.tar.gz \
 		--directory target/scratch/ \
-		./vector-${TRIPLE}
+		./collector-${TRIPLE}
 	rm -rf target/scratch/
 
 ##@ Testing (Supports `ENVIRONMENT=true`)
@@ -695,9 +700,9 @@ build-rustdoc: ## Build Vector's Rustdocs
 ##@ Packaging
 
 # archives
-target/artifacts/vector-${VERSION}-%.tar.gz: export TRIPLE :=$(@:target/artifacts/vector-${VERSION}-%.tar.gz=%)
-target/artifacts/vector-${VERSION}-%.tar.gz: override PROFILE =release
-target/artifacts/vector-${VERSION}-%.tar.gz: target/%/release/vector.tar.gz
+target/artifacts/collector-${VERSION}-%.tar.gz: export TRIPLE :=$(@:target/artifacts/collector-${VERSION}-%.tar.gz=%)
+target/artifacts/collector-${VERSION}-%.tar.gz: override PROFILE =release
+target/artifacts/collector-${VERSION}-%.tar.gz: target/%/release/collector.tar.gz
 	@echo "Built to ${<}, relocating to ${@}"
 	@mkdir -p target/artifacts/
 	@cp -v \
@@ -724,27 +729,27 @@ package-aarch64-unknown-linux-gnu-all: package-aarch64-unknown-linux-gnu package
 package-armv7-unknown-linux-gnueabihf-all: package-armv7-unknown-linux-gnueabihf package-deb-armv7-gnu package-rpm-armv7-gnu  # Build all armv7-unknown-linux-gnueabihf MUSL packages
 
 .PHONY: package-x86_64-unknown-linux-gnu
-package-x86_64-unknown-linux-gnu: target/artifacts/vector-${VERSION}-x86_64-unknown-linux-gnu.tar.gz ## Build an archive suitable for the `x86_64-unknown-linux-gnu` triple.
+package-x86_64-unknown-linux-gnu: target/artifacts/collector-${VERSION}-x86_64-unknown-linux-gnu.tar.gz ## Build an archive suitable for the `x86_64-unknown-linux-gnu` triple.
 	@echo "Output to ${<}."
 
 .PHONY: package-x86_64-unknown-linux-musl
-package-x86_64-unknown-linux-musl: target/artifacts/vector-${VERSION}-x86_64-unknown-linux-musl.tar.gz ## Build an archive suitable for the `x86_64-unknown-linux-musl` triple.
+package-x86_64-unknown-linux-musl: target/artifacts/collector-${VERSION}-x86_64-unknown-linux-musl.tar.gz ## Build an archive suitable for the `x86_64-unknown-linux-musl` triple.
 	@echo "Output to ${<}."
 
 .PHONY: package-aarch64-unknown-linux-musl
-package-aarch64-unknown-linux-musl: target/artifacts/vector-${VERSION}-aarch64-unknown-linux-musl.tar.gz ## Build an archive suitable for the `aarch64-unknown-linux-musl` triple.
+package-aarch64-unknown-linux-musl: target/artifacts/collector-${VERSION}-aarch64-unknown-linux-musl.tar.gz ## Build an archive suitable for the `aarch64-unknown-linux-musl` triple.
 	@echo "Output to ${<}."
 
 .PHONY: package-aarch64-unknown-linux-gnu
-package-aarch64-unknown-linux-gnu: target/artifacts/vector-${VERSION}-aarch64-unknown-linux-gnu.tar.gz ## Build an archive suitable for the `aarch64-unknown-linux-gnu` triple.
+package-aarch64-unknown-linux-gnu: target/artifacts/collector-${VERSION}-aarch64-unknown-linux-gnu.tar.gz ## Build an archive suitable for the `aarch64-unknown-linux-gnu` triple.
 	@echo "Output to ${<}."
 
 .PHONY: package-armv7-unknown-linux-gnueabihf
-package-armv7-unknown-linux-gnueabihf: target/artifacts/vector-${VERSION}-armv7-unknown-linux-gnueabihf.tar.gz ## Build an archive suitable for the `armv7-unknown-linux-gnueabihf` triple.
+package-armv7-unknown-linux-gnueabihf: target/artifacts/collector-${VERSION}-armv7-unknown-linux-gnueabihf.tar.gz ## Build an archive suitable for the `armv7-unknown-linux-gnueabihf` triple.
 	@echo "Output to ${<}."
 
 .PHONY: package-armv7-unknown-linux-musleabihf
-package-armv7-unknown-linux-musleabihf: target/artifacts/vector-${VERSION}-armv7-unknown-linux-musleabihf.tar.gz ## Build an archive suitable for the `armv7-unknown-linux-musleabihf triple.
+package-armv7-unknown-linux-musleabihf: target/artifacts/collector-${VERSION}-armv7-unknown-linux-musleabihf.tar.gz ## Build an archive suitable for the `armv7-unknown-linux-musleabihf triple.
 	@echo "Output to ${<}."
 
 # debs
@@ -820,6 +825,10 @@ release-rollback: ## Rollback pending release changes
 release-s3: ## Release artifacts to S3
 	@scripts/release-s3.sh
 
+.PHONY: release-only-plugins-s3
+release-only-plugins-s3: ## Release plugin artifacts to S3
+	@scripts/release-only-plugins-s3.sh
+
 .PHONY: release-helm
 release-helm: ## Package and release Helm Chart
 	@scripts/release-helm.sh
@@ -866,6 +875,7 @@ ifeq (${CI}, true)
 ci-sweep: ## Sweep up the CI to try to get more disk space.
 	@echo "Preparing the CI for build by sweeping up disk space a bit..."
 	df -h
+	sudo dpkg --configure -a
 	sudo apt-get --purge autoremove --yes
 	sudo apt-get clean
 	sudo rm -rf "/opt/*" "/usr/local/*"

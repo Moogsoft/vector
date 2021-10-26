@@ -1,4 +1,5 @@
 pub mod http;
+pub mod moogsoft;
 
 use super::config::ConfigBuilder;
 

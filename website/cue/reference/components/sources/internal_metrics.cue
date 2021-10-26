@@ -846,6 +846,16 @@ components: sources: internal_metrics: {
 			default_namespace: "vector"
 			tags:              _internal_metrics_tags
 		}
+		redis_client_errors_total: {
+			description:       "The total number of errors from attempts to create redis client objects from URIs."
+			type:              "counter"
+			default_namespace: "vector"
+		}
+		redis_connection_errors_total: {
+			description:       "The total number of errors from attempts to establish a connection to a redis client."
+			type:              "counter"
+			default_namespace: "vector"
+		}
 		request_duration_seconds: {
 			description:       "The total request duration in seconds."
 			type:              "histogram"
@@ -1105,6 +1115,8 @@ components: sources: internal_metrics: {
 			description: "The type of the error"
 			required:    true
 			enum: {
+				"client_failed":               "The creation of client object failed."
+				"connection_failed":           "The connection to client failed."
 				"delete_failed":               "The file deletion failed."
 				"field_missing":               "The event field was missing."
 				"glob_failed":                 "The glob pattern match operation failed."
@@ -1114,6 +1126,7 @@ components: sources: internal_metrics: {
 				"match_failed":                "The match operation failed."
 				"out_of_order":                "The event was out of order."
 				"parse_failed":                "The parsing operation failed."
+				"query_failed":                "The query to client failed."
 				"read_failed":                 "The file read operation failed."
 				"render_error":                "The rendering operation failed."
 				"type_conversion_failed":      "The type conversion operating failed."

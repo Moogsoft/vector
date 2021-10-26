@@ -1,4 +1,4 @@
-%define _name vector
+%define _name collector
 %define _cleaned_version %{getenv:CLEANED_VERSION}
 %define _release %{getenv:RELEASE}
 %define _url https://vector.dev
@@ -54,7 +54,7 @@ mkdir -p %{buildroot}%{_sysconfdir}/default
 mkdir -p %{buildroot}%{_sharedstatedir}/%{_name}
 mkdir -p %{buildroot}%{_unitdir}
 
-cp -a %{_builddir}/bin/vector %{buildroot}%{_bindir}
+cp -a %{_builddir}/bin/collector %{buildroot}%{_bindir}
 cp -a %{_builddir}/config/vector.toml %{buildroot}%{_sysconfdir}/%{_name}/vector.toml
 cp -a %{_builddir}/config/examples/. %{buildroot}%{_sysconfdir}/%{_name}/examples
 cp -a %{_builddir}/systemd/vector.service %{buildroot}%{_unitdir}/vector.service
