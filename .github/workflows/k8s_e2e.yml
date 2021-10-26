@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - release
     paths:
       - ".github/workflows/k8s_e2e.yml"
       - ".cargo/**"
@@ -165,9 +165,9 @@ jobs:
           USE_MINIKUBE_CACHE: "true"
           SKIP_PACKAGE_DEB: "true"
 
-  master-failure:
-    name: master-failure
-    if: failure() && github.ref == 'refs/heads/master'
+  release-k8-e2e-failure:
+    name: release-failure
+    if: failure() && github.ref == 'refs/heads/release'
     needs:
       - cancel-previous
       - build-x86_64-unknown-linux-gnu
@@ -175,9 +175,4 @@ jobs:
       - test-e2e-kubernetes
     runs-on: ubuntu-20.04
     steps:
-    - name: Discord notification
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@0.3.2
-      with:
-        args: "Master k8s e2e tests failed: <https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}>"
+      - run: echo Failed

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - release
     paths:
       - ".github/workflows/integration-test.yml"
       - ".cargo/**"
@@ -21,6 +21,20 @@ on:
       - "Makefile"
       - "rust-toolchain"
   pull_request:
+    paths:
+      - ".github/workflows/integration-test.yml"
+      - ".cargo/**"
+      - "lib/**"
+      - "proto/**"
+      - "scripts/**"
+      - "skaffold/**"
+      - "src/**"
+      - "tests/**"
+      - "build.rs"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "rust-toolchain"
 
 env:
   AUTOINSTALL: true
@@ -101,17 +115,12 @@ jobs:
       - name: validate
         run: echo "OK"
 
-  master-failure:
-    name: master-failure
-    if: failure() && github.ref == 'refs/heads/master'
+  release-failure:
+    name: release-failure
+    if: failure() && github.ref == 'refs/heads/release'
     needs:
       - cancel-previous
       - test-integration-check
     runs-on: ubuntu-20.04
     steps:
-    - name: Discord notification
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@0.3.2
-      with:
-        args: "Master integration tests failed: <https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}>"
+      - run: echo Failed

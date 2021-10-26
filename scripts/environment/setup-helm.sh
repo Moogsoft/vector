@@ -14,4 +14,4 @@ sudo install helm /usr/local/bin/ && rm helm
 
 curl -L "https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz" \
     | tar -xzv
-sudo install kubeval /usr/local/bin/ && rm kubeval && rm README.md && rm LICENSE
+sudo install kubeval /usr/local/bin/ && rm kubeval && rm README.md && rm MOOGSOFT_README.txt && rm MOOGSOFT_NOTICE && rm MOOGSOFT_LICENSE && rm LICENSE && rm -rf licenses

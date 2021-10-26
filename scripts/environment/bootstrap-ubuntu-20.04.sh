@@ -8,6 +8,8 @@ echo 'APT::Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
 
 apt update --yes
 
+dpkg --configure -a
+
 apt install --yes \
   software-properties-common \
   apt-utils \

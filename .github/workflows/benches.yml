@@ -16,7 +16,7 @@ on:
       - "rust-toolchain"
   push:
     branches:
-      - master
+      - releases
     paths:
       - ".github/workflows/benches.yml"
       - ".cargo/**"
@@ -52,6 +52,7 @@ jobs:
   bench:
     name: Bench - Linux (${{ matrix.target }})
     runs-on: [self-hosted, linux, x64, benchmarks]
+    if: ${{ false }}
     strategy:
       matrix:
         target: [bench, bench-remap-functions, bench-remap, bench-languages, bench-metrics, bench-dnstap, bench-transform]
@@ -117,17 +118,12 @@ jobs:
       - name: Stop sccache
         run: sccache --stop-server
 
-  master-failure:
-    name: master-failure
-    if: failure() && github.ref == 'refs/heads/master'
+  release-failure:
+    name: release-failure
+    if: failure() && github.ref == 'refs/heads/release'
     needs:
       - cancel-previous
       - bench
     runs-on: ubuntu-20.04
     steps:
-    - name: Discord notification
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@0.3.2
-      with:
-        args: "Master benchmarks failed: <https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}>"
+      - run: echo Failed

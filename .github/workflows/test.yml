@@ -4,7 +4,7 @@ on:
   pull_request: {}
   push:
     branches:
-      - master
+      - release
 
 env:
   AUTOINSTALL: true
@@ -177,6 +177,7 @@ jobs:
     if: ${{ needs.changes.outputs.dependencies == 'true' }}
     steps:
       - uses: actions/checkout@v2.3.4
+      - run: sudo apt-get install build-essential
       - run: make ci-sweep
       - uses: actions/cache@v2.1.6
         name: Cache Cargo registry + index
@@ -241,7 +242,7 @@ jobs:
     continue-on-error: true
     runs-on: [self-hosted, windows, x64, general]
     needs: changes
-    if: ${{ needs.changes.outputs.source == 'true' }}
+    if: ${{ needs.changes.outputs.source == 'true' && false}}
     steps:
       - uses: actions/checkout@v2.3.4
       - run: choco install llvm
@@ -280,7 +281,10 @@ jobs:
           sccache --stop-server || true
           sccache --start-server
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      - run: make test-vrl
+      #for some reason, $HOME is not set in the runners, which fails the get_env_var vrl test
+      - run: |
+          export HOME="$(dirname "${BASH_SOURCE[0]}")/../lib/vrl/tests"
+          make test-vrl
       - name: Stop sccache
         run: sccache --stop-server
 
@@ -401,9 +405,10 @@ jobs:
       - name: Check Markdown
         if: needs.changes.outputs.markdown == 'true'
         run: make check-markdown
-  master-failure:
-    name: master-failure
-    if: failure() && github.ref == 'refs/heads/master'
+
+  release-test-failure:
+    name: release-test-failure
+    if: failure() && github.ref == 'refs/heads/release'
     needs:
       - cancel-previous
       - changes
@@ -411,15 +416,10 @@ jobs:
       - test-misc
       - test-linux
       - test-mac
-      - test-windows
+      #- test-windows
       - test-vrl
       - check-component-features
       - checks
     runs-on: ubuntu-20.04
     steps:
-    - name: Discord notification
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@0.3.2
-      with:
-        args: "Master tests failed: <https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}>"
+      - run: echo Failed
