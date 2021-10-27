@@ -31,7 +31,7 @@ pub enum InnerBuffer {
 }
 
 impl Buffer {
-    pub fn new(settings: BatchSize<Self>, compression: Compression) -> Self {
+    pub const fn new(settings: BatchSize<Self>, compression: Compression) -> Self {
         Self {
             inner: None,
             num_items: 0,
@@ -48,13 +48,7 @@ impl Buffer {
             let buffer = Vec::with_capacity(bytes);
             match compression {
                 Compression::None => InnerBuffer::Plain(buffer),
-                Compression::Gzip(level) => {
-                    let level = level.unwrap_or(GZIP_FAST);
-                    InnerBuffer::Gzip(GzEncoder::new(
-                        buffer,
-                        flate2::Compression::new(level as u32),
-                    ))
-                }
+                Compression::Gzip(level) => InnerBuffer::Gzip(GzEncoder::new(buffer, level)),
             }
         })
     }
@@ -101,7 +95,7 @@ impl Batch for Buffer {
         // number of bytes written instead.
         let new_bytes = self.num_bytes + item.len();
         if self.is_empty() && item.len() > self.settings.bytes {
-            err_event_too_large(item.len())
+            err_event_too_large(item.len(), self.settings.bytes)
         } else if self.num_items >= self.settings.events || new_bytes > self.settings.bytes {
             PushResult::Overflow(item)
         } else {

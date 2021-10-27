@@ -1,23 +1,26 @@
 use crate::{
     config::Resource,
     event::Event,
-    internal_events::{ConnectionOpen, OpenGauge, TcpSocketConnectionError},
+    internal_events::{ConnectionOpen, OpenGauge, TcpSendAckError, TcpSocketConnectionError},
     shutdown::ShutdownSignal,
+    sources::util::TcpError,
     tcp::TcpKeepaliveConfig,
     tls::{MaybeTlsIncomingStream, MaybeTlsListener, MaybeTlsSettings},
     Pipeline,
 };
 use bytes::Bytes;
-use futures::{future::BoxFuture, stream, FutureExt, Sink, SinkExt, StreamExt, TryFutureExt};
+use futures::{future::BoxFuture, FutureExt, Sink, SinkExt, StreamExt};
 use listenfd::ListenFd;
 use serde::{de, Deserialize, Deserializer, Serialize};
+use smallvec::SmallVec;
 use socket2::SockRef;
-use std::{fmt, future::ready, io, mem::drop, net::SocketAddr, task::Poll, time::Duration};
+use std::{fmt, io, mem::drop, net::SocketAddr, time::Duration};
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
     time::sleep,
 };
-use tokio_util::codec::{Decoder, FramedRead, LinesCodecError};
+use tokio_util::codec::{Decoder, FramedRead};
 use tracing_futures::Instrument;
 
 async fn make_listener(
@@ -52,21 +55,6 @@ async fn make_listener(
         },
     }
 }
-pub trait IsErrorFatal {
-    fn is_error_fatal() -> bool;
-}
-
-impl IsErrorFatal for LinesCodecError {
-    fn is_error_fatal() -> bool {
-        false
-    }
-}
-
-impl IsErrorFatal for std::io::Error {
-    fn is_error_fatal() -> bool {
-        true
-    }
-}
 
 pub trait TcpSource: Clone + Send + Sync + 'static
 where
@@ -74,12 +62,17 @@ where
 {
     // Should be default: `std::io::Error`.
     // Right now this is unstable: https://github.com/rust-lang/rust/issues/29661
-    type Error: From<io::Error> + IsErrorFatal + std::fmt::Debug + std::fmt::Display + Send;
-    type Decoder: Decoder<Error = Self::Error> + Send + 'static + Send;
+    type Error: From<io::Error> + TcpError + std::fmt::Debug + std::fmt::Display + Send;
+    type Item: Into<SmallVec<[Event; 1]>> + Send;
+    type Decoder: Decoder<Item = (Self::Item, usize), Error = Self::Error> + Send + 'static;
 
     fn decoder(&self) -> Self::Decoder;
 
-    fn build_event(&self, frame: <Self::Decoder as Decoder>::Item, host: Bytes) -> Option<Event>;
+    fn handle_events(&self, _events: &mut [Event], _host: Bytes, _byte_size: usize) {}
+
+    fn build_ack(&self, _item: &Self::Item) -> Bytes {
+        Bytes::new()
+    }
 
     fn run(
         self,
@@ -159,7 +152,7 @@ where
                             debug!(message = "Accepted a new connection.", peer_addr = %peer_addr);
 
                             let open_token =
-                                connection_gauge.open(|count| emit!(ConnectionOpen { count }));
+                                connection_gauge.open(|count| emit!(&ConnectionOpen { count }));
 
                             let fut = handle_stream(
                                 shutdown_signal,
@@ -190,9 +183,9 @@ async fn handle_stream<T>(
     keepalive: Option<TcpKeepaliveConfig>,
     receive_buffer_bytes: Option<usize>,
     source: T,
-    tripwire: BoxFuture<'static, ()>,
+    mut tripwire: BoxFuture<'static, ()>,
     host: Bytes,
-    out: impl Sink<Event> + Send + 'static,
+    mut out: impl Sink<Event> + Send + 'static + Unpin,
 ) where
     <<T as TcpSource>::Decoder as tokio_util::codec::Decoder>::Item: std::marker::Send,
     T: TcpSource,
@@ -200,7 +193,7 @@ async fn handle_stream<T>(
     tokio::select! {
         result = socket.handshake() => {
             if let Err(error) = result {
-                emit!(TcpSocketConnectionError { error });
+                emit!(&TcpSocketConnectionError { error });
                 return;
             }
         },
@@ -221,59 +214,64 @@ async fn handle_stream<T>(
         }
     }
 
-    let mut shutdown_token = None;
     let mut reader = FramedRead::new(socket, source.decoder());
 
-    stream::poll_fn(|cx| {
-        if shutdown_token.is_none() {
-            match shutdown_signal.poll_unpin(cx) {
-                Poll::Ready(token) => {
-                    debug!("Start graceful shutdown.");
-                    // Close our write part of TCP socket to signal the other side
-                    // that it should stop writing and close the channel.
-                    let socket = reader.get_ref().get_ref();
-                    if let Some(stream) = socket {
-                        let socket = SockRef::from(stream);
-                        if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
-                            warn!(message = "Failed in signalling to the other side to close the TCP channel.", %error);
-                        }
-                    } else {
-                        // Connection hasn't yet been established so we are done here.
-                        debug!("Closing connection that hasn't yet been fully established.");
-                        return Poll::Ready(None);
+    loop {
+        tokio::select! {
+            _ = &mut tripwire => break,
+            _ = &mut shutdown_signal => {
+                debug!("Start graceful shutdown.");
+                // Close our write part of TCP socket to signal the other side
+                // that it should stop writing and close the channel.
+                let socket = reader.get_ref();
+                if let Some(stream) = socket.get_ref() {
+                    let socket = SockRef::from(stream);
+                    if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
+                        warn!(message = "Failed in signalling to the other side to close the TCP channel.", %error);
                     }
-
-                    shutdown_token = Some(token);
+                } else {
+                    // Connection hasn't yet been established so we are done here.
+                    debug!("Closing connection that hasn't yet been fully established.");
+                    break;
                 }
-                Poll::Pending => {}
+            },
+            res = reader.next() => {
+                match res {
+                    Some(Ok((item, byte_size))) => {
+                        let ack = source.build_ack(&item);
+                        let mut events = item.into();
+                        source.handle_events(&mut events, host.clone(), byte_size);
+                        for event in events {
+                            match out.send(event).await {
+                                Ok(_) => {
+                                    let stream = reader.get_mut();
+                                    if let Err(error) = stream.write_all(&ack).await {
+                                        emit!(&TcpSendAckError{ error });
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
+                                    warn!("Failed to send event.");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(error)) => {
+                        if !<<T as TcpSource>::Error as TcpError>::can_continue(&error) {
+                            warn!(message = "Failed to read data from TCP source.", %error);
+                            break;
+                        }
+                    }
+                    None => {
+                        debug!("Connection closed.");
+                        break
+                    },
+                }
             }
+            else => break,
         }
-
-        reader.poll_next_unpin(cx)
-    })
-    .take_until(tripwire)
-    .take_while(move |frame| ready(
-        match frame {
-            Ok(_) => true,
-            Err(_) => {
-                !<<T as TcpSource>::Error as IsErrorFatal>::is_error_fatal()
-            }
-        }
-    ))
-    .filter_map(move |frame| ready(match frame {
-        Ok(frame) => {
-            let host = host.clone();
-            source.build_event(frame, host).map(Ok)
-        }
-        Err(error) => {
-            warn!(message = "Failed to read data from TCP source.", %error);
-            None
-        }
-    }))
-    .forward(out)
-    .map_err(|_| warn!(message = "Error received while processing TCP source."))
-    .map(|_| debug!("Connection closed."))
-    .await
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

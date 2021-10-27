@@ -10,7 +10,7 @@ concurrency_limit_params.action = "defer"
 # this may actually occasionally go over the error limit above, but it
 # will be rare.
 [stats.in_flight]
-max = [5, 15]
+max = [5, 18]
 mode = [0, 6]
 mean = [2.2, 5.0]
 
@@ -20,20 +20,21 @@ mean = [20, 44]
 
 [controller.in_flight]
 max = [5, 39]
-mode = [4, 19]
-mean = [3.5, 19]
+mode = [4, 27]
+mean = [3.5, 26]
 
 [controller.concurrency_limit]
 max = [6, 39]
-mode = [2, 19]
-mean = [4.0, 20.0]
+mode = [2, 27]
+mean = [4.0, 26.5]
 
 [controller.observed_rtt]
 min = [0.100, 0.102]
-max = [0.100, 8.0]
-mean = [0.100, 4.0]
+max = [0.100, 12.7]
+mean = [0.100, 5.7]
 
 [controller.averaged_rtt]
 min = [0.100, 0.102]
 max = [0.100, 7.0]
-mean = [0.100, 3.0]
+mean = [0.100, 3.2]
+

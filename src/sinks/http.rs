@@ -4,11 +4,9 @@ use crate::{
     http::{Auth, HttpClient, MaybeAuth},
     internal_events::{HttpEventEncoded, HttpEventMissingMessage},
     sinks::util::{
-        buffer::compression::GZIP_DEFAULT,
         encoding::{EncodingConfig, EncodingConfiguration},
         http::{BatchedHttpSink, HttpSink, RequestConfig},
-        BatchConfig, BatchSettings, Buffer, Compression, Concurrency, EncodedEvent,
-        TowerRequestConfig, UriSerde,
+        BatchConfig, BatchSettings, Buffer, Compression, TowerRequestConfig, UriSerde,
     },
     tls::{TlsOptions, TlsSettings},
 };
@@ -20,7 +18,6 @@ use http::{
 };
 use hyper::Body;
 use indexmap::IndexMap;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::io::Write;
@@ -72,15 +69,6 @@ fn default_config(e: Encoding) -> HttpSinkConfig {
     }
 }
 
-lazy_static! {
-    static ref REQUEST_DEFAULTS: TowerRequestConfig = TowerRequestConfig {
-        concurrency: Concurrency::Fixed(10),
-        timeout_secs: Some(30),
-        rate_limit_num: Some(u64::max_value()),
-        ..Default::default()
-    };
-}
-
 #[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone, Derivative)]
 #[serde(rename_all = "snake_case")]
 #[derivative(Default)]
@@ -118,6 +106,13 @@ impl GenerateConfig for HttpSinkConfig {
     }
 }
 
+impl HttpSinkConfig {
+    fn build_http_client(&self, cx: &SinkContext) -> crate::Result<HttpClient> {
+        let tls = TlsSettings::from_options(&self.tls)?;
+        Ok(HttpClient::new(tls, cx.proxy())?)
+    }
+}
+
 #[async_trait::async_trait]
 #[typetag::serde(name = "http")]
 impl SinkConfig for HttpSinkConfig {
@@ -125,8 +120,7 @@ impl SinkConfig for HttpSinkConfig {
         &self,
         cx: SinkContext,
     ) -> crate::Result<(super::VectorSink, super::Healthcheck)> {
-        let tls = TlsSettings::from_options(&self.tls)?;
-        let client = HttpClient::new(tls)?;
+        let client = self.build_http_client(&cx)?;
 
         let healthcheck = match cx.healthcheck.uri.clone() {
             Some(healthcheck_uri) => {
@@ -148,8 +142,10 @@ impl SinkConfig for HttpSinkConfig {
             .bytes(bytesize::mib(10u64))
             .timeout(1)
             .parse_config(config.batch)?;
-        let request = config.request.tower.unwrap_with(&REQUEST_DEFAULTS);
-
+        let request = config
+            .request
+            .tower
+            .unwrap_with(&TowerRequestConfig::default());
         let sink = BatchedHttpSink::new(
             config,
             Buffer::new(batch.size, Compression::None),
@@ -179,7 +175,7 @@ impl HttpSink for HttpSinkConfig {
     type Input = Vec<u8>;
     type Output = Vec<u8>;
 
-    fn encode_event(&self, mut event: Event) -> Option<EncodedEvent<Self::Input>> {
+    fn encode_event(&self, mut event: Event) -> Option<Self::Input> {
         self.encoding.apply_rules(&mut event);
         let event = event.into_log();
 
@@ -190,7 +186,7 @@ impl HttpSink for HttpSinkConfig {
                     b.push(b'\n');
                     b
                 } else {
-                    emit!(HttpEventMissingMessage);
+                    emit!(&HttpEventMissingMessage);
                     return None;
                 }
             }
@@ -212,15 +208,11 @@ impl HttpSink for HttpSinkConfig {
             }
         };
 
-        emit!(HttpEventEncoded {
+        emit!(&HttpEventEncoded {
             byte_size: body.len(),
         });
 
-        let (_, metadata) = event.into_parts();
-        Some(EncodedEvent {
-            item: body,
-            metadata: Some(metadata),
-        })
+        Some(body)
     }
 
     async fn build_request(&self, mut body: Self::Output) -> crate::Result<http::Request<Vec<u8>>> {
@@ -256,8 +248,7 @@ impl HttpSink for HttpSinkConfig {
             Compression::Gzip(level) => {
                 builder = builder.header("Content-Encoding", "gzip");
 
-                let level = level.unwrap_or(GZIP_DEFAULT) as u32;
-                let mut w = GzEncoder::new(Vec::new(), flate2::Compression::new(level));
+                let mut w = GzEncoder::new(Vec::new(), level);
                 w.write_all(&body).expect("Writing to Vec can't fail");
                 body = w.finish().expect("Writing to Vec can't fail");
             }
@@ -318,7 +309,7 @@ mod tests {
             http::HttpSinkConfig,
             util::{
                 http::HttpSink,
-                test::{build_test_server, build_test_server_generic},
+                test::{build_test_server, build_test_server_generic, build_test_server_status},
             },
         },
         test_util::{next_addr, random_lines_with_stream},
@@ -346,7 +337,7 @@ mod tests {
 
         let mut config = default_config(Encoding::Text);
         config.encoding = encoding;
-        let bytes = config.encode_event(event).unwrap().item;
+        let bytes = config.encode_event(event).unwrap();
 
         assert_eq!(bytes, Vec::from("hello world\n"));
     }
@@ -358,7 +349,7 @@ mod tests {
 
         let mut config = default_config(Encoding::Json);
         config.encoding = encoding;
-        let bytes = config.encode_event(event).unwrap().item;
+        let bytes = config.encode_event(event).unwrap();
 
         #[derive(Deserialize, Debug)]
         #[serde(deny_unknown_fields)]
@@ -381,7 +372,7 @@ mod tests {
         Auth = "token:thing_and-stuff"
         X-Custom-Nonsense = "_%_{}_-_&_._`_|_~_!_#_&_$_"
         "#;
-        let config: HttpSinkConfig = toml::from_str(&config).unwrap();
+        let config: HttpSinkConfig = toml::from_str(config).unwrap();
 
         assert!(super::validate_headers(&config.request.headers, &None).is_ok());
     }
@@ -394,7 +385,7 @@ mod tests {
         [request.headers]
         "\u0001" = "bad"
         "#;
-        let config: HttpSinkConfig = toml::from_str(&config).unwrap();
+        let config: HttpSinkConfig = toml::from_str(config).unwrap();
 
         assert_downcast_matches!(
             super::validate_headers(&config.request.headers, &None).unwrap_err(),
@@ -418,7 +409,7 @@ mod tests {
         user = "user"
         password = "password"
         "#;
-        let config: HttpSinkConfig = toml::from_str(&config).unwrap();
+        let config: HttpSinkConfig = toml::from_str(config).unwrap();
 
         let cx = SinkContext::new_test();
 
@@ -577,12 +568,7 @@ mod tests {
 
         let (in_addr, sink) = build_sink("").await;
 
-        let (rx, trigger, server) = build_test_server_generic(in_addr, move || {
-            Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(Body::empty())
-                .unwrap_or_else(|_| unreachable!())
-        });
+        let (rx, trigger, server) = build_test_server_status(in_addr, StatusCode::FORBIDDEN);
 
         let (batch, mut receiver) = BatchNotifier::new_with_receiver();
         let (_input_lines, events) = random_lines_with_stream(100, num_lines, Some(batch));

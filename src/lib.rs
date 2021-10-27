@@ -10,6 +10,9 @@
 #![allow(clippy::unit_arg)]
 #![deny(clippy::clone_on_ref_ptr)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
+#![deny(clippy::disallowed_method)] // [nursery] mark some functions as verboten
+#![deny(clippy::missing_const_for_fn)] // [nursery] valuable to the optimizer,
+                                       // but may produce false positives
 
 #[macro_use]
 extern crate tracing;
@@ -23,10 +26,10 @@ pub mod config;
 pub mod cli;
 pub mod conditions;
 pub mod dns;
+#[cfg(feature = "docker")]
+pub mod docker;
 pub mod expiring_hash_map;
 pub mod generate;
-#[cfg(feature = "wasm")]
-pub mod wasm;
 #[macro_use]
 pub mod internal_events;
 #[cfg(feature = "api")]
@@ -34,7 +37,11 @@ pub mod api;
 pub mod app;
 pub mod async_read;
 pub mod buffers;
+#[cfg(feature = "codecs")]
+pub mod codecs;
 pub mod encoding_transcode;
+pub mod enrichment_tables;
+pub mod graph;
 pub mod heartbeat;
 pub mod http;
 #[cfg(any(feature = "sources-kafka", feature = "sinks-kafka"))]
@@ -43,9 +50,12 @@ pub mod kubernetes;
 pub mod line_agg;
 pub mod list;
 pub(crate) mod pipeline;
+pub(crate) mod proto;
+pub mod providers;
 #[cfg(feature = "rusoto_core")]
 pub mod rusoto;
 pub mod serde;
+#[cfg(windows)]
 pub mod service;
 pub mod shutdown;
 pub mod signal;
@@ -90,16 +100,22 @@ pub fn vector_version() -> impl std::fmt::Display {
 
 pub fn get_version() -> String {
     let pkg_version = vector_version();
-    let commit_hash = built_info::GIT_VERSION.and_then(|v| v.split('-').last());
-    let built_date = chrono::DateTime::parse_from_rfc2822(built_info::BUILT_TIME_UTC)
-        .unwrap()
-        .format("%Y-%m-%d");
-    let built_string = if let Some(commit_hash) = commit_hash {
-        format!("{} {} {}", commit_hash, built_info::TARGET, built_date)
-    } else {
-        built_info::TARGET.into()
+    let build_desc = built_info::VECTOR_BUILD_DESC;
+    let build_string = match build_desc {
+        Some(desc) => format!("{} {}", built_info::TARGET, desc),
+        None => built_info::TARGET.into(),
     };
-    format!("{} ({})", pkg_version, built_string)
+
+    // We do not add 'debug' to the BUILD_DESC unless the caller has flagged on line
+    // or full debug symbols. See the Cargo Book profiling section for value meaning:
+    // https://doc.rust-lang.org/cargo/reference/profiles.html#debug
+    let build_string = match built_info::DEBUG {
+        "1" => format!("{} debug=line", build_string),
+        "2" | "true" => format!("{} debug=full", build_string),
+        _ => build_string,
+    };
+
+    format!("{} ({})", pkg_version, build_string)
 }
 
 #[allow(unused)]

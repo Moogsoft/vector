@@ -23,10 +23,6 @@ impl Segment {
         Segment::Index(v)
     }
 
-    pub fn is_value(&self) -> bool {
-        matches!(self, Segment::Index(_))
-    }
-
     #[tracing::instrument(skip(segment))]
     pub(crate) fn from_lookup(segment: Pair<'_, Rule>) -> crate::Result<Vec<Segment>> {
         let rule = segment.as_rule();
@@ -36,10 +32,10 @@ impl Segment {
         for inner_segment in segment.into_inner() {
             match inner_segment.as_rule() {
                 Rule::path_segment => {
-                    segments.append(&mut Segment::from_path_segment(inner_segment)?)
+                    segments.append(&mut Segment::from_path_segment(inner_segment)?);
                 }
                 Rule::quoted_path_segment => {
-                    segments.push(Segment::from_quoted_path_segment(inner_segment)?)
+                    segments.push(Segment::from_quoted_path_segment(inner_segment)?);
                 }
                 _ => {
                     return Err(format!(
@@ -65,7 +61,7 @@ impl Segment {
             match inner_segment.as_rule() {
                 Rule::path_field_name => {
                     tracing::trace!(segment = %inner_segment.as_str(), rule = ?inner_segment.as_rule(), action = %"push");
-                    segments.push(Segment::field(inner_segment.as_str().to_owned()))
+                    segments.push(Segment::field(inner_segment.as_str().to_owned()));
                 }
                 Rule::path_index => segments.push(Segment::from_path_index(inner_segment)?),
                 _ => {

@@ -1,6 +1,11 @@
-use crate::{event::Event, internal_events::EventOut, transforms::FunctionTransform};
+use crate::{internal_events::EventsSent, transforms::FunctionTransform};
 use futures::{channel::mpsc, task::Poll, Sink};
+#[cfg(test)]
+use futures::{Stream, StreamExt};
 use std::{collections::VecDeque, fmt, pin::Pin, task::Context};
+#[cfg(test)]
+use vector_core::event::EventStatus;
+use vector_core::{event::Event, ByteSizeOf};
 
 #[derive(Debug)]
 pub struct ClosedError;
@@ -23,6 +28,8 @@ pub struct Pipeline {
     #[derivative(Debug = "ignore")]
     inlines: Vec<Box<dyn FunctionTransform>>,
     enqueued: VecDeque<Event>,
+    events_outstanding: usize,
+    bytes_outstanding: usize,
 }
 
 impl Pipeline {
@@ -30,6 +37,17 @@ impl Pipeline {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), <Self as Sink<Event>>::Error>> {
+        // We batch the updates to "events out" for efficiency, and do it here because
+        // it gives us a chance to allow the natural batching of `Pipeline` to kick in.
+        if self.events_outstanding > 0 {
+            emit!(&EventsSent {
+                count: self.events_outstanding,
+                byte_size: self.bytes_outstanding,
+            });
+            self.events_outstanding = 0;
+            self.bytes_outstanding = 0;
+        }
+
         while let Some(event) = self.enqueued.pop_front() {
             match self.inner.poll_ready(cx) {
                 Poll::Pending => {
@@ -74,7 +92,9 @@ impl Sink<Event> for Pipeline {
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Event) -> Result<(), Self::Error> {
-        emit!(EventOut { count: 1 });
+        self.events_outstanding += 1;
+        self.bytes_outstanding += item.size_of();
+
         // Note how this gets **swapped** with `new_working_set` in the loop.
         // At the end of the loop, it will only contain finalized events.
         let mut working_set = vec![item];
@@ -104,6 +124,21 @@ impl Pipeline {
         Self::new_with_buffer(100, vec![])
     }
 
+    #[cfg(test)]
+    pub fn new_test_finalize(status: EventStatus) -> (Self, impl Stream<Item = Event> + Unpin) {
+        let (pipe, recv) = Self::new_with_buffer(100, vec![]);
+        // In a source test pipeline, there is no sink to acknowledge
+        // events, so we have to add a map to the receiver to handle the
+        // finalization.
+        let recv = recv.map(move |mut event| {
+            let metadata = event.metadata_mut();
+            metadata.update_status(status);
+            metadata.update_sources();
+            event
+        });
+        (pipe, recv)
+    }
+
     pub fn new_with_buffer(
         n: usize,
         inlines: Vec<Box<dyn FunctionTransform>>,
@@ -122,6 +157,8 @@ impl Pipeline {
             // We ensure the buffer is sufficient that it is unlikely to require reallocations.
             // There is a possibility a component might blow this queue size.
             enqueued: VecDeque::with_capacity(10),
+            events_outstanding: 0,
+            bytes_outstanding: 0,
         }
     }
 }

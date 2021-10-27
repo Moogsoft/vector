@@ -1,8 +1,7 @@
 use crate::{
     buffers::Acker,
     config::{log_schema, DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
-    event::Event,
-    internal_events::TemplateRenderingFailed,
+    internal_events::{KafkaHeaderExtractionFailed, TemplateRenderingFailed},
     kafka::{KafkaAuthConfig, KafkaCompression, KafkaStatisticsContext},
     serde::to_string,
     sinks::util::{
@@ -18,6 +17,7 @@ use futures::{
 use rdkafka::{
     consumer::{BaseConsumer, Consumer},
     error::{KafkaError, RDKafkaErrorCode},
+    message::OwnedHeaders,
     producer::{DeliveryFuture, FutureProducer, FutureRecord},
     ClientConfig,
 };
@@ -31,6 +31,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::time::{sleep, Duration};
+use vector_core::event::{Event, EventMetadata, EventStatus, Value};
 
 // Maximum number of futures blocked by [send_result](https://docs.rs/rdkafka/0.24.0/rdkafka/producer/future_producer/struct.FutureProducer.html#method.send_result)
 const SEND_RESULT_LIMIT: usize = 5;
@@ -62,13 +63,14 @@ pub struct KafkaSinkConfig {
     message_timeout_ms: u64,
     #[serde(default)]
     librdkafka_options: HashMap<String, String>,
+    headers_key: Option<String>,
 }
 
-fn default_socket_timeout_ms() -> u64 {
+const fn default_socket_timeout_ms() -> u64 {
     60000 // default in librdkafka
 }
 
-fn default_message_timeout_ms() -> u64 {
+const fn default_message_timeout_ms() -> u64 {
     300000 // default in librdkafka
 }
 
@@ -84,15 +86,25 @@ pub struct KafkaSink {
     topic: Template,
     key_field: Option<String>,
     encoding: EncodingConfig<Encoding>,
-    delivery_fut: FuturesUnordered<BoxFuture<'static, (usize, Result<DeliveryFuture, KafkaError>)>>,
+    delivery_fut: FuturesUnordered<
+        BoxFuture<'static, (usize, Result<DeliveryFuture, KafkaError>, EventMetadata)>,
+    >,
     in_flight: FuturesUnordered<
-        BoxFuture<'static, (usize, Result<Result<(i32, i64), KafkaError>, Canceled>)>,
+        BoxFuture<
+            'static,
+            (
+                usize,
+                Result<Result<(i32, i64), KafkaError>, Canceled>,
+                EventMetadata,
+            ),
+        >,
     >,
 
     acker: Acker,
     seq_head: usize,
     seq_tail: usize,
     pending_acks: HashSet<usize>,
+    headers_key: Option<String>,
 }
 
 inventory::submit! {
@@ -241,13 +253,15 @@ impl KafkaSink {
             seq_head: 0,
             seq_tail: 0,
             pending_acks: HashSet::new(),
+            headers_key: config.headers_key,
         })
     }
 
     fn poll_delivery_fut(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         while !self.delivery_fut.is_empty() {
             let result = Pin::new(&mut self.delivery_fut).poll_next(cx);
-            let (seqno, result) = ready!(result).expect("`delivery_fut` is endless stream");
+            let (seqno, result, metadata) =
+                ready!(result).expect("`delivery_fut` is endless stream");
             self.in_flight.push(Box::pin(async move {
                 let result = match result {
                     Ok(fut) => {
@@ -257,7 +271,7 @@ impl KafkaSink {
                     Err(error) => Ok(Err(error)),
                 };
 
-                (seqno, result)
+                (seqno, result, metadata)
             }));
         }
 
@@ -282,7 +296,7 @@ impl Sink<Event> for KafkaSink {
         );
 
         let topic = self.topic.render_string(&item).map_err(|error| {
-            emit!(TemplateRenderingFailed {
+            emit!(&TemplateRenderingFailed {
                 error,
                 field: Some("topic"),
                 drop_event: true,
@@ -292,20 +306,35 @@ impl Sink<Event> for KafkaSink {
         let timestamp_ms = match &item {
             Event::Log(log) => log
                 .get(log_schema().timestamp_key())
-                .and_then(|v| v.as_timestamp()),
-            Event::Metric(metric) => metric.data.timestamp.as_ref(),
+                .and_then(|v| v.as_timestamp())
+                .copied(),
+            Event::Metric(metric) => metric.timestamp(),
         }
         .map(|ts| ts.timestamp_millis());
-        let (key, body) = encode_event(item, &self.key_field, &self.encoding);
+
+        let headers = self
+            .headers_key
+            .as_ref()
+            .and_then(|headers_key| get_headers(&item, headers_key));
+
+        let (key, body, metadata) = encode_event(item, &self.key_field, &self.encoding);
 
         let seqno = self.seq_head;
         self.seq_head += 1;
 
         let producer = Arc::clone(&self.producer);
+        let has_key_field = self.key_field.is_some();
+
         self.delivery_fut.push(Box::pin(async move {
-            let mut record = FutureRecord::to(&topic).key(&key).payload(&body[..]);
+            let mut record = FutureRecord::to(&topic).payload(&body[..]);
+            if has_key_field {
+                record = record.key(&key);
+            }
             if let Some(timestamp) = timestamp_ms {
                 record = record.timestamp(timestamp);
+            }
+            if let Some(headers) = headers {
+                record = record.headers(headers);
             }
 
             let result = loop {
@@ -318,7 +347,7 @@ impl Sink<Event> for KafkaSink {
                     Err((error, future_record))
                         if error == KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull) =>
                     {
-                        debug!(message = "The rdkafka queue full.", %error, %seqno, internal_log_rate_secs = 1);
+                        debug!(message = "The rdkafka queue is full.", %error, %seqno, internal_log_rate_secs = 1);
                         record = future_record;
                         sleep(Duration::from_millis(10)).await;
                     }
@@ -326,7 +355,7 @@ impl Sink<Event> for KafkaSink {
                 }
             };
 
-            (seqno, result)
+            (seqno, result, metadata)
         }));
 
         Ok(())
@@ -338,13 +367,17 @@ impl Sink<Event> for KafkaSink {
         let this = Pin::into_inner(self);
         while !this.in_flight.is_empty() {
             match ready!(Pin::new(&mut this.in_flight).poll_next(cx)) {
-                Some((seqno, Ok(result))) => {
+                Some((seqno, Ok(result), metadata)) => {
                     match result {
                         Ok((partition, offset)) => {
-                            trace!(message = "Produced message.", ?partition, ?offset)
+                            metadata.update_status(EventStatus::Delivered);
+                            trace!(message = "Produced message.", ?partition, ?offset);
                         }
-                        Err(error) => error!(message = "Kafka error.", %error),
-                    };
+                        Err(error) => {
+                            metadata.update_status(EventStatus::Errored);
+                            error!(message = "Kafka error.", %error);
+                        }
+                    }
 
                     this.pending_acks.insert(seqno);
 
@@ -355,8 +388,9 @@ impl Sink<Event> for KafkaSink {
                     }
                     this.acker.ack(num_to_ack);
                 }
-                Some((_, Err(Canceled))) => {
+                Some((_, Err(Canceled), metadata)) => {
                     error!(message = "Request canceled.");
+                    metadata.update_status(EventStatus::Errored);
                     return Poll::Ready(Err(()));
                 }
                 None => break,
@@ -369,6 +403,34 @@ impl Sink<Event> for KafkaSink {
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.poll_flush(cx)
     }
+}
+
+fn get_headers(event: &Event, headers_key: &str) -> Option<OwnedHeaders> {
+    if let Event::Log(log) = event {
+        if let Some(headers) = log.get(headers_key) {
+            match headers {
+                Value::Map(headers_map) => {
+                    let mut owned_headers = OwnedHeaders::new_with_capacity(headers_map.len());
+                    for (key, value) in headers_map {
+                        if let Value::Bytes(value_bytes) = value {
+                            owned_headers = owned_headers.add(key, value_bytes.as_ref());
+                        } else {
+                            emit!(&KafkaHeaderExtractionFailed {
+                                header_field: headers_key
+                            });
+                        }
+                    }
+                    return Some(owned_headers);
+                }
+                _ => {
+                    emit!(&KafkaHeaderExtractionFailed {
+                        header_field: headers_key
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn healthcheck(config: KafkaSinkConfig) -> crate::Result<()> {
@@ -405,7 +467,7 @@ fn encode_event(
     mut event: Event,
     key_field: &Option<String>,
     encoding: &EncodingConfig<Encoding>,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, EventMetadata) {
     let key = key_field
         .as_ref()
         .and_then(|f| match &event {
@@ -419,7 +481,7 @@ fn encode_event(
 
     encoding.apply_rules(&mut event);
 
-    let body = match event {
+    let body = match &event {
         Event::Log(log) => match encoding.codec() {
             Encoding::Json => serde_json::to_vec(&log).unwrap(),
             Encoding::Text => log
@@ -433,11 +495,15 @@ fn encode_event(
         },
     };
 
-    (key, body)
+    let metadata = event.into_metadata();
+    (key, body, metadata)
 }
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use rdkafka::message::Headers;
+
     use super::*;
     use crate::event::{Metric, MetricKind, MetricValue};
     use std::collections::BTreeMap;
@@ -452,7 +518,7 @@ mod tests {
         crate::test_util::trace_init();
         let key = "";
         let message = "hello world".to_string();
-        let (key_bytes, bytes) = encode_event(
+        let (key_bytes, bytes, _metadata) = encode_event(
             message.clone().into(),
             &None,
             &EncodingConfig::from(Encoding::Text),
@@ -470,7 +536,7 @@ mod tests {
         event.as_mut_log().insert("key", "value");
         event.as_mut_log().insert("foo", "bar");
 
-        let (key, bytes) = encode_event(
+        let (key, bytes, _metadata) = encode_event(
             event,
             &Some("key".into()),
             &EncodingConfig::from(Encoding::Json),
@@ -491,7 +557,7 @@ mod tests {
             MetricKind::Absolute,
             MetricValue::Counter { value: 0.0 },
         );
-        let (key_bytes, bytes) = encode_event(
+        let (key_bytes, bytes, _metadata) = encode_event(
             metric.clone().into(),
             &None,
             &EncodingConfig::from(Encoding::Text),
@@ -508,7 +574,7 @@ mod tests {
             MetricKind::Absolute,
             MetricValue::Counter { value: 0.0 },
         );
-        let (key_bytes, bytes) = encode_event(
+        let (key_bytes, bytes, _metadata) = encode_event(
             metric.clone().into(),
             &None,
             &EncodingConfig::from(Encoding::Json),
@@ -527,7 +593,7 @@ mod tests {
         let mut event = Event::from("hello");
         event.as_mut_log().insert("key", "value");
 
-        let (key, bytes) = encode_event(
+        let (key, bytes, _metadata) = encode_event(
             event,
             &Some("key".into()),
             &EncodingConfig {
@@ -544,6 +610,23 @@ mod tests {
         assert_eq!(&key[..], b"value");
         assert!(!map.contains_key("key"));
     }
+
+    #[test]
+    fn kafka_get_headers() {
+        let headers_key = "headers";
+        let mut header_values = BTreeMap::new();
+        header_values.insert("a-key".to_string(), Value::Bytes(Bytes::from("a-value")));
+        header_values.insert("b-key".to_string(), Value::Bytes(Bytes::from("b-value")));
+
+        let mut event = Event::from("hello");
+        event.as_mut_log().insert(headers_key, header_values);
+
+        let headers = get_headers(&event, headers_key).unwrap();
+        assert_eq!(headers.get(0).unwrap().0, "a-key");
+        assert_eq!(headers.get(0).unwrap().1, "a-value".as_bytes());
+        assert_eq!(headers.get(1).unwrap().0, "b-key");
+        assert_eq!(headers.get(1).unwrap().1, "b-value".as_bytes());
+    }
 }
 
 #[cfg(feature = "kafka-integration-tests")]
@@ -556,12 +639,15 @@ mod integration_test {
         test_util::{random_lines_with_stream, random_string, wait_for},
         tls::TlsOptions,
     };
+    use bytes::Bytes;
     use futures::StreamExt;
     use rdkafka::{
         consumer::{BaseConsumer, Consumer},
+        message::Headers,
         Message, Offset, TopicPartitionList,
     };
-    use std::{future::ready, thread, time::Duration};
+    use std::{collections::BTreeMap, future::ready, thread, time::Duration};
+    use vector_core::event::{BatchNotifier, BatchStatus};
 
     #[tokio::test]
     async fn healthcheck() {
@@ -579,6 +665,7 @@ mod integration_test {
             socket_timeout_ms: 60000,
             message_timeout_ms: 300000,
             librdkafka_options: HashMap::new(),
+            headers_key: None,
         };
 
         super::healthcheck(config).await.unwrap();
@@ -633,6 +720,7 @@ mod integration_test {
             message_timeout_ms: 300000,
             batch,
             librdkafka_options,
+            headers_key: None,
         };
         let (acker, _ack_counter) = Acker::new_for_testing();
         config.clone().to_rdkafka(KafkaRole::Consumer)?;
@@ -771,7 +859,7 @@ mod integration_test {
         compression: KafkaCompression,
     ) {
         let topic = format!("test-{}", random_string(10));
-
+        let headers_key = "headers_key".to_string();
         let kafka_auth = KafkaAuthConfig { sasl, tls };
         let config = KafkaSinkConfig {
             bootstrap_servers: server.to_string(),
@@ -784,14 +872,34 @@ mod integration_test {
             socket_timeout_ms: 60000,
             message_timeout_ms: 300000,
             librdkafka_options: HashMap::new(),
+            headers_key: Some(headers_key.clone()),
         };
         let topic = format!("{}-{}", topic, chrono::Utc::now().format("%Y%m%d"));
         let (acker, ack_counter) = Acker::new_for_testing();
         let sink = KafkaSink::new(config, acker).unwrap();
 
         let num_events = 1000;
-        let (input, events) = random_lines_with_stream(100, num_events, None);
-        events.map(Ok).forward(sink).await.unwrap();
+        let (batch, mut receiver) = BatchNotifier::new_with_receiver();
+        let (input, events) = random_lines_with_stream(100, num_events, Some(batch));
+
+        let header_1_key = "header-1-key";
+        let header_1_value = "header-1-value";
+        events
+            .map(|mut event| {
+                let mut header_values = BTreeMap::new();
+                header_values.insert(
+                    header_1_key.to_string(),
+                    Value::Bytes(Bytes::from(header_1_value)),
+                );
+                event
+                    .as_mut_log()
+                    .insert(headers_key.clone(), header_values);
+                Ok(event)
+            })
+            .forward(sink)
+            .await
+            .unwrap();
+        assert_eq!(receiver.try_recv(), Ok(BatchStatus::Delivered));
 
         // read back everything from the beginning
         let mut client_config = rdkafka::ClientConfig::new();
@@ -834,6 +942,9 @@ mod integration_test {
                 Some(Ok(msg)) => {
                     let s: &str = msg.payload_view().unwrap().unwrap();
                     out.push(s.to_owned());
+                    let (header_key, header_val) = msg.headers().unwrap().get(0).unwrap();
+                    assert_eq!(header_key, header_1_key);
+                    assert_eq!(header_val, header_1_value.as_bytes());
                 }
                 None if out.len() >= input.len() => break,
                 _ => {

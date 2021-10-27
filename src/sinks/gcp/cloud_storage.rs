@@ -27,7 +27,6 @@ use hyper::{
     Body, Request, Response,
 };
 use indoc::indoc;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::{collections::HashMap, convert::TryFrom, task::Poll};
@@ -119,14 +118,6 @@ enum GcsStorageClass {
     Archive,
 }
 
-lazy_static! {
-    static ref REQUEST_DEFAULTS: TowerRequestConfig = TowerRequestConfig {
-        concurrency: Concurrency::Fixed(25),
-        rate_limit_num: Some(1000),
-        ..Default::default()
-    };
-}
-
 #[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum Encoding {
@@ -135,7 +126,7 @@ enum Encoding {
 }
 
 impl Encoding {
-    fn content_type(self) -> &'static str {
+    const fn content_type(self) -> &'static str {
         match self {
             Self::Text => "text/plain",
             Self::Ndjson => "application/x-ndjson",
@@ -189,14 +180,14 @@ enum HealthcheckError {
 }
 
 impl GcsSink {
-    async fn new(config: &GcsSinkConfig, _cx: &SinkContext) -> crate::Result<Self> {
+    async fn new(config: &GcsSinkConfig, cx: &SinkContext) -> crate::Result<Self> {
         let creds = config
             .auth
             .make_credentials(Scope::DevStorageReadWrite)
             .await?;
         let settings = RequestSettings::new(config)?;
         let tls = TlsSettings::from_options(&config.tls)?;
-        let client = HttpClient::new(tls)?;
+        let client = HttpClient::new(tls, cx.proxy())?;
         let base_url = format!("{}{}/", BASE_URL, config.bucket);
         let bucket = config.bucket.clone();
         Ok(GcsSink {
@@ -209,7 +200,11 @@ impl GcsSink {
     }
 
     fn service(self, config: &GcsSinkConfig, cx: &SinkContext) -> crate::Result<VectorSink> {
-        let request = config.request.unwrap_with(&REQUEST_DEFAULTS);
+        let request = config.request.unwrap_with(&TowerRequestConfig {
+            concurrency: Concurrency::Fixed(25),
+            rate_limit_num: Some(1000),
+            ..Default::default()
+        });
         let encoding = config.encoding.clone();
 
         let batch = BatchSettings::default()
@@ -397,7 +392,7 @@ impl RequestSettings {
 fn make_header((name, value): (&String, &String)) -> crate::Result<(HeaderName, HeaderValue)> {
     Ok((
         HeaderName::from_bytes(name.as_bytes())?,
-        HeaderValue::from_str(&value)?,
+        HeaderValue::from_str(value)?,
     ))
 }
 
@@ -409,7 +404,7 @@ fn encode_event(
     let key = key_prefix
         .render_string(&event)
         .map_err(|error| {
-            emit!(TemplateRenderingFailed {
+            emit!(&TemplateRenderingFailed {
                 error,
                 field: Some("key_prefix"),
                 drop_event: true,

@@ -31,7 +31,7 @@ impl Assignment {
 
 impl Function for Assignment {
     fn apply(&self, target: &mut Event) -> Result<()> {
-        match self.function.execute(&target)? {
+        match self.function.execute(target)? {
             QueryValue::Value(v) => {
                 target.as_mut_log().insert(&self.path, v);
                 Ok(())
@@ -150,20 +150,6 @@ impl Mapping {
     pub(self) fn new(assignments: Vec<Box<dyn Function>>) -> Self {
         Mapping { assignments }
     }
-
-    /// Execute the mapping with a given `Event`
-    ///
-    /// # Errors
-    ///
-    /// This function will fail if the underlying mapping could not be applied.
-    pub fn execute(&self, event: &mut Event) -> Result<()> {
-        for (i, assignment) in self.assignments.iter().enumerate() {
-            if let Err(err) = assignment.apply(event) {
-                return Err(format!("failed to apply mapping {}: {}", i, err));
-            }
-        }
-        Ok(())
-    }
 }
 
 //------------------------------------------------------------------------------
@@ -240,7 +226,7 @@ impl Function for MergeFn {
 
         match (to_value, from_value) {
             (Value::Map(ref mut map1), QueryValue::Value(Value::Map(ref map2))) => {
-                merge_maps(map1, &map2, deep);
+                merge_maps(map1, map2, deep);
                 Ok(())
             }
 

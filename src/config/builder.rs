@@ -1,11 +1,15 @@
 #[cfg(feature = "api")]
 use super::api;
+#[cfg(feature = "datadog-pipelines")]
+use super::datadog;
 use super::{
-    compiler, default_data_dir, Config, GlobalOptions, HealthcheckOptions, SinkConfig, SinkOuter,
-    SourceConfig, TestDefinition, TransformConfig, TransformOuter,
+    compiler, provider, ComponentKey, Config, EnrichmentTableConfig, EnrichmentTableOuter,
+    HealthcheckOptions, SinkConfig, SinkOuter, SourceConfig, SourceOuter, TestDefinition,
+    TransformOuter,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use vector_core::{config::GlobalOptions, default_data_dir, transform::TransformConfig};
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
@@ -15,16 +19,22 @@ pub struct ConfigBuilder {
     #[cfg(feature = "api")]
     #[serde(default)]
     pub api: api::Options,
+    #[cfg(feature = "datadog-pipelines")]
+    #[serde(default)]
+    pub datadog: datadog::Options,
     #[serde(default)]
     pub healthchecks: HealthcheckOptions,
     #[serde(default)]
-    pub sources: IndexMap<String, Box<dyn SourceConfig>>,
+    pub enrichment_tables: IndexMap<ComponentKey, EnrichmentTableOuter>,
     #[serde(default)]
-    pub sinks: IndexMap<String, SinkOuter>,
+    pub sources: IndexMap<ComponentKey, SourceOuter>,
     #[serde(default)]
-    pub transforms: IndexMap<String, TransformOuter>,
+    pub sinks: IndexMap<ComponentKey, SinkOuter>,
+    #[serde(default)]
+    pub transforms: IndexMap<ComponentKey, TransformOuter>,
     #[serde(default)]
     pub tests: Vec<TestDefinition>,
+    pub provider: Option<Box<dyn provider::ProviderConfig>>,
 }
 
 impl Clone for ConfigBuilder {
@@ -45,10 +55,14 @@ impl From<Config> for ConfigBuilder {
             global: c.global,
             #[cfg(feature = "api")]
             api: c.api,
+            #[cfg(feature = "datadog-pipelines")]
+            datadog: c.datadog,
             healthchecks: c.healthchecks,
+            enrichment_tables: c.enrichment_tables,
             sources: c.sources,
             sinks: c.sinks,
             transforms: c.transforms,
+            provider: None,
             tests: c.tests,
         }
     }
@@ -69,35 +83,51 @@ impl ConfigBuilder {
         compiler::compile(self)
     }
 
-    pub fn add_source<S: SourceConfig + 'static, T: Into<String>>(&mut self, name: T, source: S) {
-        self.sources.insert(name.into(), Box::new(source));
+    pub fn add_enrichment_table<E: EnrichmentTableConfig + 'static, T: Into<String>>(
+        &mut self,
+        name: T,
+        enrichment_table: E,
+    ) {
+        self.enrichment_tables.insert(
+            ComponentKey::from(name.into()),
+            EnrichmentTableOuter::new(Box::new(enrichment_table)),
+        );
+    }
+
+    pub fn add_source<S: SourceConfig + 'static, T: Into<String>>(&mut self, id: T, source: S) {
+        self.sources
+            .insert(ComponentKey::from(id.into()), SourceOuter::new(source));
     }
 
     pub fn add_sink<S: SinkConfig + 'static, T: Into<String>>(
         &mut self,
-        name: T,
+        id: T,
         inputs: &[&str],
         sink: S,
     ) {
-        let inputs = inputs.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
+        let inputs = inputs.iter().map(ComponentKey::from).collect::<Vec<_>>();
         let sink = SinkOuter::new(inputs, Box::new(sink));
 
-        self.sinks.insert(name.into(), sink);
+        self.sinks.insert(ComponentKey::from(id.into()), sink);
     }
 
     pub fn add_transform<T: TransformConfig + 'static, S: Into<String>>(
         &mut self,
-        name: S,
+        id: S,
         inputs: &[&str],
         transform: T,
     ) {
-        let inputs = inputs.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
+        let inputs = inputs
+            .iter()
+            .map(|value| ComponentKey::from(value.to_string()))
+            .collect::<Vec<_>>();
         let transform = TransformOuter {
             inner: Box::new(transform),
             inputs,
         };
 
-        self.transforms.insert(name.into(), transform);
+        self.transforms
+            .insert(ComponentKey::from(id.into()), transform);
     }
 
     pub fn append(&mut self, with: Self) -> Result<(), Vec<String>> {
@@ -107,6 +137,31 @@ impl ConfigBuilder {
         if let Err(error) = self.api.merge(with.api) {
             errors.push(error);
         }
+
+        #[cfg(feature = "datadog-pipelines")]
+        {
+            self.datadog = with.datadog;
+            if self.datadog.enabled {
+                // enable other enterprise features
+                self.global.enterprise = true;
+            }
+        }
+
+        self.provider = with.provider;
+
+        if self.global.proxy.http.is_some() && with.global.proxy.http.is_some() {
+            errors.push("conflicting values for 'proxy.http' found".to_owned());
+        }
+
+        if self.global.proxy.https.is_some() && with.global.proxy.https.is_some() {
+            errors.push("conflicting values for 'proxy.https' found".to_owned());
+        }
+
+        if !self.global.proxy.no_proxy.is_empty() && !with.global.proxy.no_proxy.is_empty() {
+            errors.push("conflicting values for 'proxy.no_proxy' found".to_owned());
+        }
+
+        self.global.proxy = self.global.proxy.merge(&with.global.proxy);
 
         if self.global.data_dir.is_none() || self.global.data_dir == default_data_dir() {
             self.global.data_dir = with.global.data_dir;
@@ -126,19 +181,24 @@ impl ConfigBuilder {
 
         self.healthchecks.merge(with.healthchecks);
 
+        with.enrichment_tables.keys().for_each(|k| {
+            if self.enrichment_tables.contains_key(k) {
+                errors.push(format!("duplicate enrichment_table name found: {}", k));
+            }
+        });
         with.sources.keys().for_each(|k| {
             if self.sources.contains_key(k) {
-                errors.push(format!("duplicate source name found: {}", k));
+                errors.push(format!("duplicate source id found: {}", k));
             }
         });
         with.sinks.keys().for_each(|k| {
             if self.sinks.contains_key(k) {
-                errors.push(format!("duplicate sink name found: {}", k));
+                errors.push(format!("duplicate sink id found: {}", k));
             }
         });
         with.transforms.keys().for_each(|k| {
             if self.transforms.contains_key(k) {
-                errors.push(format!("duplicate transform name found: {}", k));
+                errors.push(format!("duplicate transform id found: {}", k));
             }
         });
         with.tests.iter().for_each(|wt| {
@@ -150,11 +210,24 @@ impl ConfigBuilder {
             return Err(errors);
         }
 
+        self.enrichment_tables.extend(with.enrichment_tables);
         self.sources.extend(with.sources);
         self.sinks.extend(with.sinks);
         self.transforms.extend(with.transforms);
         self.tests.extend(with.tests);
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn from_toml(input: &str) -> Self {
+        crate::config::format::deserialize(input, Some(crate::config::format::Format::Toml))
+            .unwrap()
+    }
+
+    #[cfg(test)]
+    pub fn from_json(input: &str) -> Self {
+        crate::config::format::deserialize(input, Some(crate::config::format::Format::Json))
+            .unwrap()
     }
 }

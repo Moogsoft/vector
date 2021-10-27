@@ -34,7 +34,7 @@ enum Errors {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RemoteWriteConfig {
+pub struct RemoteWriteConfig {
     pub endpoint: String,
 
     pub default_namespace: Option<String>,
@@ -61,10 +61,6 @@ inventory::submit! {
     SinkDescription::new::<RemoteWriteConfig>("prometheus_remote_write")
 }
 
-lazy_static::lazy_static! {
-    static ref REQUEST_DEFAULTS: TowerRequestConfig = Default::default();
-}
-
 impl_generate_config_from_default!(RemoteWriteConfig);
 
 #[async_trait::async_trait]
@@ -80,11 +76,11 @@ impl SinkConfig for RemoteWriteConfig {
             .events(1_000)
             .timeout(1)
             .parse_config(self.batch)?;
-        let request = self.request.unwrap_with(&REQUEST_DEFAULTS);
+        let request = self.request.unwrap_with(&TowerRequestConfig::default());
         let buckets = self.buckets.clone();
         let quantiles = self.quantiles.clone();
 
-        let client = HttpClient::new(tls_settings)?;
+        let client = HttpClient::new(tls_settings, cx.proxy())?;
         let tenant_id = self.tenant_id.clone();
         let auth = self.auth.clone();
 
@@ -111,7 +107,7 @@ impl SinkConfig for RemoteWriteConfig {
                             template
                                 .render_string(&event)
                                 .map_err(|error| {
-                                    emit!(TemplateRenderingFailed {
+                                    emit!(&TemplateRenderingFailed {
                                         error,
                                         field: Some("tenant_id"),
                                         drop_event: false,
@@ -503,19 +499,17 @@ mod integration_tests {
             assert_eq!(metrics.len(), 1);
             let output = &metrics[0];
 
-            match metric.data.value {
+            match metric.value() {
                 MetricValue::Gauge { value } => {
-                    assert_eq!(output["value"], Value::Number((value as u32).into()))
+                    assert_eq!(output["value"], Value::Number((*value as u32).into()))
                 }
                 _ => panic!("Unhandled metric value, fix the test"),
             }
             for (tag, value) in metric.tags().unwrap() {
                 assert_eq!(output[&tag[..]], Value::String(value.to_string()));
             }
-            let timestamp = format_timestamp(
-                metric.data.timestamp.unwrap(),
-                chrono::SecondsFormat::Millis,
-            );
+            let timestamp =
+                format_timestamp(metric.timestamp().unwrap(), chrono::SecondsFormat::Millis);
             assert_eq!(output["time"], Value::String(timestamp));
         }
 

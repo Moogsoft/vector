@@ -4,28 +4,31 @@ use crate::{
     event::Metric,
     shutdown::ShutdownSignal,
     sinks::{self, util::UriSerde},
-    sources, transforms, Pipeline,
+    sources, Pipeline,
 };
 use async_trait::async_trait;
 use component::ComponentDescription;
 use indexmap::IndexMap; // IndexMap preserves insertion order, allowing us to output errors in the same order they are present in the file
 use serde::{Deserialize, Serialize};
-use shared::TimeZone;
-use snafu::{ResultExt, Snafu};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
-use std::fs::DirBuilder;
 use std::hash::Hash;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+pub use vector_core::config::GlobalOptions;
+pub use vector_core::transform::{DataType, ExpandType, TransformConfig, TransformContext};
 
 pub mod api;
 mod builder;
 mod compiler;
 pub mod component;
+#[cfg(feature = "datadog-pipelines")]
+pub mod datadog;
 mod diff;
 pub mod format;
+mod id;
 mod loading;
+pub mod provider;
 mod unit_test;
 mod validation;
 mod vars;
@@ -34,22 +37,21 @@ pub mod watcher;
 pub use builder::ConfigBuilder;
 pub use diff::ConfigDiff;
 pub use format::{Format, FormatHint};
+pub use id::{ComponentKey, ComponentScope};
 pub use loading::{
-    load_builder_from_paths, load_from_paths, load_from_str, merge_path_lists, process_paths,
-    CONFIG_PATHS,
+    load, load_builder_from_paths, load_from_paths, load_from_paths_with_provider, load_from_str,
+    merge_path_lists, process_paths, CONFIG_PATHS,
 };
 pub use unit_test::build_unit_tests_main as build_unit_tests;
 pub use validation::warnings;
+pub use vector_core::config::proxy::ProxyConfig;
 pub use vector_core::config::{log_schema, LogSchema};
 
 /// Loads Log Schema from configurations and sets global schema.
 /// Once this is done, configurations can be correctly loaded using
 /// configured log schema defaults.
 /// If deny is set, will panic if schema has already been set.
-pub fn init_log_schema(
-    config_paths: &[(PathBuf, FormatHint)],
-    deny_if_set: bool,
-) -> Result<(), Vec<String>> {
+pub fn init_log_schema(config_paths: &[ConfigPath], deny_if_set: bool) -> Result<(), Vec<String>> {
     vector_core::config::init_log_schema(
         || {
             let (builder, _) = load_builder_from_paths(config_paths)?;
@@ -59,98 +61,44 @@ pub fn init_log_schema(
     )
 }
 
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum ConfigPath {
+    File(PathBuf, FormatHint),
+    Dir(PathBuf),
+}
+
+impl<'a> From<&'a ConfigPath> for &'a PathBuf {
+    fn from(config_path: &'a ConfigPath) -> &'a PathBuf {
+        match config_path {
+            ConfigPath::File(path, _) => path,
+            ConfigPath::Dir(path) => path,
+        }
+    }
+}
+
+impl ConfigPath {
+    pub const fn as_dir(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Dir(path) => Some(path),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     pub global: GlobalOptions,
     #[cfg(feature = "api")]
     pub api: api::Options,
+    #[cfg(feature = "datadog-pipelines")]
+    pub datadog: datadog::Options,
     pub healthchecks: HealthcheckOptions,
-    pub sources: IndexMap<String, Box<dyn SourceConfig>>,
-    pub sinks: IndexMap<String, SinkOuter>,
-    pub transforms: IndexMap<String, TransformOuter>,
+    pub sources: IndexMap<ComponentKey, SourceOuter>,
+    pub sinks: IndexMap<ComponentKey, SinkOuter>,
+    pub transforms: IndexMap<ComponentKey, TransformOuter>,
+    pub enrichment_tables: IndexMap<ComponentKey, EnrichmentTableOuter>,
     tests: Vec<TestDefinition>,
-    expansions: IndexMap<String, Vec<String>>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct GlobalOptions {
-    #[serde(default = "default_data_dir")]
-    pub data_dir: Option<PathBuf>,
-    #[serde(skip_serializing_if = "crate::serde::skip_serializing_if_default")]
-    pub log_schema: LogSchema,
-    #[serde(skip_serializing_if = "crate::serde::skip_serializing_if_default")]
-    pub timezone: TimeZone,
-}
-
-pub fn default_data_dir() -> Option<PathBuf> {
-    Some(PathBuf::from("/var/lib/vector/"))
-}
-
-#[derive(Debug, Snafu)]
-pub enum DataDirError {
-    #[snafu(display("data_dir option required, but not given here or globally"))]
-    MissingDataDir,
-    #[snafu(display("data_dir {:?} does not exist", data_dir))]
-    DoesNotExist { data_dir: PathBuf },
-    #[snafu(display("data_dir {:?} is not writable", data_dir))]
-    NotWritable { data_dir: PathBuf },
-    #[snafu(display(
-        "Could not create subdirectory {:?} inside of data dir {:?}: {}",
-        subdir,
-        data_dir,
-        source
-    ))]
-    CouldNotCreate {
-        subdir: PathBuf,
-        data_dir: PathBuf,
-        source: std::io::Error,
-    },
-}
-
-impl GlobalOptions {
-    /// Resolve the `data_dir` option in either the global or local
-    /// config, and validate that it exists and is writable.
-    pub fn resolve_and_validate_data_dir(
-        &self,
-        local_data_dir: Option<&PathBuf>,
-    ) -> crate::Result<PathBuf> {
-        let data_dir = local_data_dir
-            .or_else(|| self.data_dir.as_ref())
-            .ok_or(DataDirError::MissingDataDir)
-            .map_err(Box::new)?
-            .to_path_buf();
-        if !data_dir.exists() {
-            return Err(DataDirError::DoesNotExist { data_dir }.into());
-        }
-        let readonly = std::fs::metadata(&data_dir)
-            .map(|meta| meta.permissions().readonly())
-            .unwrap_or(true);
-        if readonly {
-            return Err(DataDirError::NotWritable { data_dir }.into());
-        }
-        Ok(data_dir)
-    }
-
-    /// Resolve the `data_dir` option using
-    /// `resolve_and_validate_data_dir` and then ensure a named
-    /// subdirectory exists.
-    pub fn resolve_and_make_data_subdir(
-        &self,
-        local: Option<&PathBuf>,
-        subdir: &str,
-    ) -> crate::Result<PathBuf> {
-        let data_dir = self.resolve_and_validate_data_dir(local)?;
-
-        let mut data_subdir = data_dir.clone();
-        data_subdir.push(subdir);
-
-        DirBuilder::new()
-            .recursive(true)
-            .create(&data_subdir)
-            .with_context(|| CouldNotCreate { subdir, data_dir })?;
-        Ok(data_subdir)
-    }
+    expansions: IndexMap<ComponentKey, Vec<ComponentKey>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -182,13 +130,6 @@ impl Default for HealthcheckOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub enum DataType {
-    Any,
-    Log,
-    Metric,
-}
-
 pub trait GenerateConfig {
     fn generate_config() -> toml::Value;
 }
@@ -204,7 +145,33 @@ macro_rules! impl_generate_config_from_default {
     };
 }
 
-#[async_trait::async_trait]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SourceOuter {
+    #[serde(default = "default_acknowledgements")]
+    pub acknowledgements: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "vector_core::serde::skip_serializing_if_default"
+    )]
+    pub proxy: ProxyConfig,
+    #[serde(flatten)]
+    pub(super) inner: Box<dyn SourceConfig>,
+}
+
+const fn default_acknowledgements() -> bool {
+    false
+}
+
+impl SourceOuter {
+    pub(crate) fn new(source: impl SourceConfig + 'static) -> Self {
+        Self {
+            acknowledgements: default_acknowledgements(),
+            inner: Box::new(source),
+            proxy: Default::default(),
+        }
+    }
+}
+
 #[async_trait]
 #[typetag::serde(tag = "type")]
 pub trait SourceConfig: core::fmt::Debug + Send + Sync {
@@ -221,26 +188,30 @@ pub trait SourceConfig: core::fmt::Debug + Send + Sync {
 }
 
 pub struct SourceContext {
-    pub name: String,
+    pub key: ComponentKey,
     pub globals: GlobalOptions,
     pub shutdown: ShutdownSignal,
     pub out: Pipeline,
+    pub acknowledgements: bool,
+    pub proxy: ProxyConfig,
 }
 
 impl SourceContext {
     #[cfg(test)]
     pub fn new_shutdown(
-        name: &str,
+        key: &ComponentKey,
         out: Pipeline,
     ) -> (Self, crate::shutdown::SourceShutdownCoordinator) {
         let mut shutdown = crate::shutdown::SourceShutdownCoordinator::default();
-        let (shutdown_signal, _) = shutdown.register_source(name);
+        let (shutdown_signal, _) = shutdown.register_source(key);
         (
             Self {
-                name: name.into(),
+                key: key.clone(),
                 globals: GlobalOptions::default(),
                 shutdown: shutdown_signal,
                 out,
+                acknowledgements: default_acknowledgements(),
+                proxy: Default::default(),
             },
             shutdown,
         )
@@ -249,10 +220,12 @@ impl SourceContext {
     #[cfg(test)]
     pub fn new_test(out: Pipeline) -> Self {
         Self {
-            name: "default".into(),
+            key: ComponentKey::from("default"),
             globals: GlobalOptions::default(),
             shutdown: ShutdownSignal::noop(),
             out,
+            acknowledgements: default_acknowledgements(),
+            proxy: Default::default(),
         }
     }
 }
@@ -263,8 +236,8 @@ inventory::collect!(SourceDescription);
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct SinkOuter {
-    pub inputs: Vec<String>,
-
+    #[serde(default)]
+    pub inputs: Vec<ComponentKey>,
     // We are accepting this option for backward compatibility.
     healthcheck_uri: Option<UriSerde>,
 
@@ -276,24 +249,31 @@ pub struct SinkOuter {
     #[serde(default)]
     pub buffer: crate::buffers::BufferConfig,
 
+    #[serde(
+        default,
+        skip_serializing_if = "vector_core::serde::skip_serializing_if_default"
+    )]
+    proxy: ProxyConfig,
+
     #[serde(flatten)]
     pub inner: Box<dyn SinkConfig>,
 }
 
 impl SinkOuter {
-    pub fn new(inputs: Vec<String>, inner: Box<dyn SinkConfig>) -> Self {
+    pub fn new(inputs: Vec<ComponentKey>, inner: Box<dyn SinkConfig>) -> SinkOuter {
         SinkOuter {
+            inputs,
             buffer: Default::default(),
             healthcheck: SinkHealthcheckOptions::default(),
             healthcheck_uri: None,
             inner,
-            inputs,
+            proxy: Default::default(),
         }
     }
 
-    pub fn resources(&self, name: &str) -> Vec<Resource> {
+    pub fn resources(&self, id: &ComponentKey) -> Vec<Resource> {
         let mut resources = self.inner.resources();
-        resources.append(&mut self.buffer.resources(name));
+        resources.append(&mut self.buffer.resources(&id.to_string()));
         resources
     }
 
@@ -301,7 +281,9 @@ impl SinkOuter {
         if self.healthcheck_uri.is_some() && self.healthcheck.uri.is_some() {
             warn!("Both `healthcheck.uri` and `healthcheck_uri` options are specified. Using value of `healthcheck.uri`.")
         } else if self.healthcheck_uri.is_some() {
-            warn!("`healthcheck_uri` option has been deprecated, use `healthcheck.uri` instead. ")
+            warn!(
+                "The `healthcheck_uri` option has been deprecated, use `healthcheck.uri` instead."
+            )
         }
         SinkHealthcheckOptions {
             uri: self
@@ -311,6 +293,10 @@ impl SinkOuter {
                 .or_else(|| self.healthcheck_uri.clone()),
             ..self.healthcheck.clone()
         }
+    }
+
+    pub const fn proxy(&self) -> &ProxyConfig {
+        &self.proxy
     }
 }
 
@@ -368,6 +354,7 @@ pub struct SinkContext {
     pub(super) acker: Acker,
     pub(super) healthcheck: SinkHealthcheckOptions,
     pub(super) globals: GlobalOptions,
+    pub(super) proxy: ProxyConfig,
 }
 
 impl SinkContext {
@@ -377,6 +364,7 @@ impl SinkContext {
             acker: Acker::Null,
             healthcheck: SinkHealthcheckOptions::default(),
             globals: GlobalOptions::default(),
+            proxy: ProxyConfig::default(),
         }
     }
 
@@ -384,8 +372,12 @@ impl SinkContext {
         self.acker.clone()
     }
 
-    pub fn globals(&self) -> &GlobalOptions {
+    pub const fn globals(&self) -> &GlobalOptions {
         &self.globals
+    }
+
+    pub const fn proxy(&self) -> &ProxyConfig {
+        &self.proxy
     }
 }
 
@@ -395,35 +387,40 @@ inventory::collect!(SinkDescription);
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TransformOuter {
-    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub inputs: Vec<ComponentKey>,
     #[serde(flatten)]
     pub inner: Box<dyn TransformConfig>,
 }
 
-#[async_trait]
-#[typetag::serde(tag = "type")]
-pub trait TransformConfig: core::fmt::Debug + Send + Sync + dyn_clone::DynClone {
-    async fn build(&self, globals: &GlobalOptions) -> crate::Result<transforms::Transform>;
-
-    fn input_type(&self) -> DataType;
-
-    fn output_type(&self) -> DataType;
-
-    fn transform_type(&self) -> &'static str;
-
-    /// Allows a transform configuration to expand itself into multiple "child"
-    /// transformations to replace it. This allows a transform to act as a macro
-    /// for various patterns.
-    fn expand(&mut self) -> crate::Result<Option<IndexMap<String, Box<dyn TransformConfig>>>> {
-        Ok(None)
-    }
-}
-
-dyn_clone::clone_trait_object!(TransformConfig);
-
 pub type TransformDescription = ComponentDescription<Box<dyn TransformConfig>>;
 
 inventory::collect!(TransformDescription);
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct EnrichmentTableOuter {
+    #[serde(flatten)]
+    pub inner: Box<dyn EnrichmentTableConfig>,
+}
+
+impl EnrichmentTableOuter {
+    pub fn new(inner: Box<dyn EnrichmentTableConfig>) -> Self {
+        EnrichmentTableOuter { inner }
+    }
+}
+
+#[async_trait]
+#[typetag::serde(tag = "type")]
+pub trait EnrichmentTableConfig: core::fmt::Debug + Send + Sync + dyn_clone::DynClone {
+    async fn build(
+        &self,
+        globals: &GlobalOptions,
+    ) -> crate::Result<Box<dyn enrichment::Table + Send + Sync>>;
+}
+
+pub type EnrichmentTableDescription = ComponentDescription<Box<dyn EnrichmentTableConfig>>;
+
+inventory::collect!(EnrichmentTableDescription);
 
 /// Unique thing, like port, of which only one owner can be.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -441,11 +438,11 @@ pub enum Protocol {
 }
 
 impl Resource {
-    pub fn tcp(addr: SocketAddr) -> Self {
+    pub const fn tcp(addr: SocketAddr) -> Self {
         Self::Port(addr, Protocol::Tcp)
     }
 
-    pub fn udp(addr: SocketAddr) -> Self {
+    pub const fn udp(addr: SocketAddr) -> Self {
         Self::Port(addr, Protocol::Udp)
     }
 
@@ -521,7 +518,7 @@ pub struct TestDefinition {
     #[serde(default)]
     pub outputs: Vec<TestOutput>,
     #[serde(default)]
-    pub no_outputs_from: Vec<String>,
+    pub no_outputs_from: Vec<ComponentKey>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -536,7 +533,7 @@ pub enum TestInputValue {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TestInput {
-    pub insert_at: String,
+    pub insert_at: ComponentKey,
     #[serde(default = "default_test_input_type", rename = "type")]
     pub type_str: String,
     pub value: Option<String>,
@@ -551,7 +548,7 @@ fn default_test_input_type() -> String {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TestOutput {
-    pub extract_from: String,
+    pub extract_from: ComponentKey,
     pub conditions: Option<Vec<conditions::AnyCondition>>,
 }
 
@@ -560,14 +557,14 @@ impl Config {
         Default::default()
     }
 
-    /// Expand a logical component name (i.e. from the config file) into the names of the
+    /// Expand a logical component id (i.e. from the config file) into the ids of the
     /// components it was expanded to as part of the macro process. Does not check that the
     /// identifier is otherwise valid.
-    pub fn get_inputs(&self, identifier: &str) -> Vec<String> {
+    pub fn get_inputs(&self, identifier: &ComponentKey) -> Vec<ComponentKey> {
         self.expansions
             .get(identifier)
             .cloned()
-            .unwrap_or_else(|| vec![String::from(identifier)])
+            .unwrap_or_else(|| vec![identifier.clone()])
     }
 }
 
@@ -578,7 +575,7 @@ impl Config {
     feature = "transforms-json_parser"
 ))]
 mod test {
-    use super::{builder::ConfigBuilder, format, load_from_str, Format};
+    use super::{builder::ConfigBuilder, format, load_from_str, ComponentKey, Format};
     use indoc::indoc;
     use std::path::PathBuf;
 
@@ -683,6 +680,9 @@ mod test {
                     indoc! {r#"
                         data_dir = "/foobar"
 
+                        [proxy]
+                          http = "http://proxy.inc:3128"
+
                         [transforms.foo]
                           type = "json_parser"
                           inputs = [ "in" ]
@@ -706,10 +706,12 @@ mod test {
             Ok(())
         );
 
+        assert!(config.global.proxy.http.is_some());
+        assert!(config.global.proxy.https.is_none());
         assert_eq!(Some(PathBuf::from("/foobar")), config.global.data_dir);
-        assert!(config.sources.contains_key("in"));
-        assert!(config.sinks.contains_key("out"));
-        assert!(config.transforms.contains_key("foo"));
+        assert!(config.sources.contains_key(&ComponentKey::from("in")));
+        assert!(config.sinks.contains_key(&ComponentKey::from("out")));
+        assert!(config.transforms.contains_key(&ComponentKey::from("foo")));
         assert_eq!(config.tests.len(), 1);
     }
 
@@ -752,10 +754,75 @@ mod test {
                 .unwrap()
             ),
             Err(vec![
-                "duplicate source name found: in".into(),
-                "duplicate sink name found: out".into(),
+                "duplicate source id found: in".into(),
+                "duplicate sink id found: out".into(),
             ])
         );
+    }
+
+    #[test]
+    fn with_proxy() {
+        let config: ConfigBuilder = format::deserialize(
+            indoc! {r#"
+                [proxy]
+                  http = "http://server:3128"
+                  https = "http://other:3128"
+                  no_proxy = ["localhost", "127.0.0.1"]
+
+                [sources.in]
+                  type = "nginx_metrics"
+                  endpoints = ["http://localhost:8000/basic_status"]
+                  proxy.http = "http://server:3128"
+                  proxy.https = "http://other:3128"
+                  proxy.no_proxy = ["localhost", "127.0.0.1"]
+
+                [sinks.out]
+                  type = "console"
+                  inputs = ["in"]
+                  encoding = "json"
+            "#},
+            Some(Format::Toml),
+        )
+        .unwrap();
+        assert_eq!(config.global.proxy.http, Some("http://server:3128".into()));
+        assert_eq!(config.global.proxy.https, Some("http://other:3128".into()));
+        assert!(config.global.proxy.no_proxy.matches("localhost"));
+        let source = config.sources.get(&ComponentKey::from("in")).unwrap();
+        assert_eq!(source.proxy.http, Some("http://server:3128".into()));
+        assert_eq!(source.proxy.https, Some("http://other:3128".into()));
+        assert!(source.proxy.no_proxy.matches("localhost"));
+    }
+
+    #[test]
+    fn with_partial_proxy() {
+        let config: ConfigBuilder = format::deserialize(
+            indoc! {r#"
+                [proxy]
+                  http = "http://server:3128"
+
+                [sources.in]
+                  type = "nginx_metrics"
+                  endpoints = ["http://localhost:8000/basic_status"]
+
+                [sources.in.proxy]
+                  http = "http://server:3128"
+                  https = "http://other:3128"
+                  no_proxy = ["localhost", "127.0.0.1"]
+
+                [sinks.out]
+                  type = "console"
+                  inputs = ["in"]
+                  encoding = "json"
+            "#},
+            Some(Format::Toml),
+        )
+        .unwrap();
+        assert_eq!(config.global.proxy.http, Some("http://server:3128".into()));
+        assert_eq!(config.global.proxy.https, None);
+        let source = config.sources.get(&ComponentKey::from("in")).unwrap();
+        assert_eq!(source.proxy.http, Some("http://server:3128".into()));
+        assert_eq!(source.proxy.https, Some("http://other:3128".into()));
+        assert!(source.proxy.no_proxy.matches("localhost"));
     }
 }
 

@@ -83,14 +83,14 @@ where
             let stream = match invocation_result {
                 Ok(val) => val,
                 Err(watcher::invocation::Error::Desync { source }) => {
-                    emit!(internal_events::InvocationDesyncReceived { error: source });
+                    emit!(&internal_events::InvocationDesyncReceived { error: source });
                     // We got desynced, reset the state and retry fetching.
                     self.resource_version.reset();
                     self.state_writer.resync().await;
                     continue;
                 }
                 Err(watcher::invocation::Error::Recoverable { source }) => {
-                    emit!(internal_events::InvocationHttpErrorReceived { error: source });
+                    emit!(&internal_events::InvocationHttpErrorReceived { error: source });
                     continue;
                 }
                 Err(watcher::invocation::Error::Other { source }) => {
@@ -126,20 +126,16 @@ where
                         // We got a stream-level desync error, abort the stream
                         // and handle the desync.
                         Err(watcher::stream::Error::Desync { source }) => {
-                            emit!(internal_events::StreamDesyncReceived { error: source });
+                            emit!(&internal_events::StreamDesyncReceived { error: source });
                             // We got desynced, reset the state and retry fetching.
                             self.resource_version.reset();
                             self.state_writer.resync().await;
                             continue 'outer;
                         }
-                        // Any other streaming error means the protocol is in
-                        // an unxpected state.
-                        // This is considered a fatal error, do not attempt
-                        // to retry and just quit.
-                        // TODO: retry these errors
-                        // https://github.com/timberio/vector/issues/7149
-                        Err(watcher::stream::Error::Other { source }) => {
-                            return Err(Error::Streaming { source });
+                        // We have an error, attempt to recover from this error and continue the outer loop.
+                        Err(watcher::stream::Error::Recoverable { source }) => {
+                            emit!(&internal_events::InvocationHttpErrorReceived { error: source });
+                            continue 'outer;
                         }
                         // A fine watch respose arrived, we just pass it down.
                         Ok(val) => val,
@@ -245,6 +241,7 @@ mod tests {
     use super::{Error, Reflector};
     use crate::{
         kubernetes::{
+            hash_value::HashKey,
             instrumenting_watcher::InstrumentingWatcher,
             mock_watcher::{self, MockWatcher},
             state,
@@ -923,7 +920,20 @@ mod tests {
 
             // Send an error to the stream.
             watch_stream_tx
-                .send(mock_watcher::ScenarioActionStream::ErrOther)
+                .send(mock_watcher::ScenarioActionStream::ErrRecoverable)
+                .await
+                .unwrap();
+
+            // Wait for watcher to request next item from the stream.
+            assert!(matches!(
+                watcher_events_rx.next().await.unwrap(),
+                mock_watcher::ScenarioEvent::Invocation(_)
+            ));
+
+            // We're done with the test, send the error to terminate the
+            // reflector.
+            watcher_invocations_tx
+                .send(mock_watcher::ScenarioActionInvocation::ErrOther)
                 .await
                 .unwrap();
         });
@@ -936,12 +946,7 @@ mod tests {
         logic.await.unwrap();
 
         // Assert that the reflector properly passed the error.
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::Streaming {
-                source: mock_watcher::StreamError
-            }
-        ));
+        assert!(matches!(result.unwrap_err(), Error::Invocation { .. }));
 
         // Explicitly drop the reflector at the very end.
         drop(reflector);
@@ -1066,7 +1071,7 @@ mod tests {
 
         // Prepare state.
         let (state_reader, state_writer) = evmap::new();
-        let state_writer = state::evmap::Writer::new(state_writer, None); // test without debounce to avouid complexity
+        let state_writer = state::evmap::Writer::new(state_writer, None, HashKey::Uid); // test without debounce to avoid complexity
         let state_writer = state::instrumenting::Writer::new(state_writer);
         let resulting_state_reader = state_reader.clone();
 

@@ -15,6 +15,7 @@ use futures::{
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::{
+    collections::BTreeSet,
     fs::{create_dir, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -29,11 +30,11 @@ use tracing::{error, info};
 use vector::{
     buffers::Acker,
     config::{
-        DataType, GlobalOptions, SinkConfig, SinkContext, SourceConfig, SourceContext,
-        TransformConfig,
+        DataType, SinkConfig, SinkContext, SourceConfig, SourceContext, TransformConfig,
+        TransformContext,
     },
     event::{
-        metric::{self, MetricValue},
+        metric::{self, MetricData, MetricValue},
         Event, Value,
     },
     sinks::{util::StreamSink, Healthcheck, VectorSink},
@@ -178,7 +179,7 @@ impl SourceConfig for MockSourceConfig {
     }
 
     fn output_type(&self) -> DataType {
-        self.data_type.clone().unwrap()
+        self.data_type.unwrap()
     }
 
     fn source_type(&self) -> &'static str {
@@ -203,42 +204,39 @@ impl FunctionTransform for MockTransform {
                 v.push_str(&self.suffix);
                 log.insert(vector::config::log_schema().message_key(), Value::from(v));
             }
-            Event::Metric(metric) => match metric.data.value {
-                MetricValue::Counter { ref mut value } => {
-                    *value += self.increase;
-                }
-                MetricValue::Distribution {
-                    ref mut samples,
-                    statistic: _,
-                } => {
-                    samples.push(metric::Sample {
+            Event::Metric(metric) => {
+                let increment = match metric.value() {
+                    MetricValue::Counter { .. } => Some(MetricValue::Counter {
                         value: self.increase,
-                        rate: 1,
-                    });
+                    }),
+                    MetricValue::Gauge { .. } => Some(MetricValue::Gauge {
+                        value: self.increase,
+                    }),
+                    MetricValue::Distribution { statistic, .. } => {
+                        Some(MetricValue::Distribution {
+                            samples: vec![metric::Sample {
+                                value: self.increase,
+                                rate: 1,
+                            }],
+                            statistic: *statistic,
+                        })
+                    }
+                    MetricValue::AggregatedHistogram { .. } => None,
+                    MetricValue::AggregatedSummary { .. } => None,
+                    MetricValue::Set { .. } => {
+                        let mut values = BTreeSet::new();
+                        values.insert(self.suffix.clone());
+                        Some(MetricValue::Set { values })
+                    }
+                };
+                if let Some(increment) = increment {
+                    assert!(metric.add(&MetricData {
+                        kind: metric.kind(),
+                        timestamp: metric.timestamp(),
+                        value: increment,
+                    }));
                 }
-                MetricValue::AggregatedHistogram {
-                    ref mut count,
-                    ref mut sum,
-                    ..
-                } => {
-                    *count += 1;
-                    *sum += self.increase;
-                }
-                MetricValue::AggregatedSummary {
-                    ref mut count,
-                    ref mut sum,
-                    ..
-                } => {
-                    *count += 1;
-                    *sum += self.increase;
-                }
-                MetricValue::Gauge { ref mut value, .. } => {
-                    *value += self.increase;
-                }
-                MetricValue::Set { ref mut values, .. } => {
-                    values.insert(self.suffix.clone());
-                }
-            },
+            }
         };
         output.push(event);
     }
@@ -259,7 +257,7 @@ impl MockTransformConfig {
 #[async_trait]
 #[typetag::serde(name = "mock")]
 impl TransformConfig for MockTransformConfig {
-    async fn build(&self, _globals: &GlobalOptions) -> Result<Transform, vector::Error> {
+    async fn build(&self, _globals: &TransformContext) -> Result<Transform, vector::Error> {
         Ok(Transform::function(MockTransform {
             suffix: self.suffix.clone(),
             increase: self.increase,
@@ -356,7 +354,7 @@ where
     S: Sink<Event> + Send + std::marker::Unpin,
     <S as Sink<Event>>::Error: std::fmt::Display,
 {
-    async fn run(&mut self, mut input: BoxStream<'_, Event>) -> Result<(), ()> {
+    async fn run(mut self: Box<Self>, mut input: BoxStream<'_, Event>) -> Result<(), ()> {
         while let Some(event) = input.next().await {
             if let Err(error) = self.sink.send(event).await {
                 error!(message = "Ingesting an event failed at mock sink.", %error);

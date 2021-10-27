@@ -4,7 +4,7 @@ use super::{
     metadata::EventMetadata,
     util, Lookup, PathComponent, Value,
 };
-use crate::config::log_schema;
+use crate::{config::log_schema, ByteSizeOf};
 use bytes::Bytes;
 use chrono::Utc;
 use derivative::Derivative;
@@ -19,7 +19,7 @@ use std::{
     iter::FromIterator,
 };
 
-#[derive(Clone, Debug, Getters, MutGetters, PartialEq, Derivative, Deserialize)]
+#[derive(Clone, Debug, Getters, MutGetters, PartialEq, PartialOrd, Derivative, Deserialize)]
 pub struct LogEvent {
     // **IMPORTANT:** Due to numerous legacy reasons this **must** be a Map variant.
     #[derivative(Default(value = "Value::from(BTreeMap::default())"))]
@@ -37,6 +37,12 @@ impl Default for LogEvent {
             fields: Value::Map(BTreeMap::new()),
             metadata: EventMetadata::default(),
         }
+    }
+}
+
+impl ByteSizeOf for LogEvent {
+    fn allocated_bytes(&self) -> usize {
+        self.fields.allocated_bytes() + self.metadata.allocated_bytes()
     }
 }
 
@@ -69,10 +75,13 @@ impl LogEvent {
         )
     }
 
-    pub fn with_batch_notifier(self, batch: Arc<BatchNotifier>) -> Self {
-        // Don't make new metadata, just modify it
-        let (fields, metadata) = self.into_parts();
-        Self::from_parts(fields, metadata.with_finalizer(EventFinalizer::new(batch)))
+    pub fn with_batch_notifier(mut self, batch: &Arc<BatchNotifier>) -> Self {
+        self.metadata = self.metadata.with_batch_notifier(batch);
+        self
+    }
+
+    pub fn add_finalizer(&mut self, finalizer: EventFinalizer) {
+        self.metadata.add_finalizer(finalizer);
     }
 
     #[instrument(level = "trace", skip(self, key), fields(key = %key.as_ref()))]
@@ -104,6 +113,14 @@ impl LogEvent {
         util::log::insert(self.as_map_mut(), key.as_ref(), value.into())
     }
 
+    #[instrument(level = "trace", skip(self, key), fields(key = %key.as_ref()))]
+    pub fn try_insert(&mut self, key: impl AsRef<str>, value: impl Into<Value> + Debug) {
+        let key = key.as_ref();
+        if !self.contains(key) {
+            self.insert(key, value);
+        }
+    }
+
     #[instrument(level = "trace", skip(self, key), fields(key = ?key))]
     pub fn insert_path<V>(&mut self, key: Vec<PathComponent>, value: V) -> Option<Value>
     where
@@ -112,20 +129,47 @@ impl LogEvent {
         util::log::insert_path(self.as_map_mut(), key, value.into())
     }
 
+    /// Rename a key in place without reference to pathing
+    ///
+    /// The function will rename a key in place without reference to any path
+    /// information in the key, much as if you were to call [`remove`] and then
+    /// [`insert_flat`].
+    ///
+    /// This function is a no-op if `from_key` and `to_key` are identical. If
+    /// `to_key` already exists in the structure its value will be overwritten
+    /// silently.
+    #[instrument(level = "trace", skip(self, from_key, to_key), fields(key = %from_key))]
+    #[inline]
+    pub fn rename_key_flat<K>(&mut self, from_key: K, to_key: K)
+    where
+        K: AsRef<str> + Into<String> + PartialEq + Display,
+    {
+        if from_key != to_key {
+            if let Some(val) = self.fields.as_map_mut().remove(from_key.as_ref()) {
+                self.insert_flat(to_key, val);
+            }
+        }
+    }
+
+    /// Insert a key in place without reference to pathing
+    ///
+    /// This function will insert a key in place without reference to any
+    /// pathing information in the key. It will insert over the top of any value
+    /// that exists in the map already.
     #[instrument(level = "trace", skip(self, key), fields(key = %key))]
-    pub fn insert_flat<K, V>(&mut self, key: K, value: V)
+    pub fn insert_flat<K, V>(&mut self, key: K, value: V) -> Option<Value>
     where
         K: Into<String> + Display,
         V: Into<Value> + Debug,
     {
-        self.as_map_mut().insert(key.into(), value.into());
+        self.as_map_mut().insert(key.into(), value.into())
     }
 
     #[instrument(level = "trace", skip(self, key), fields(key = %key.as_ref()))]
-    pub fn try_insert(&mut self, key: impl AsRef<str>, value: impl Into<Value> + Debug) {
+    pub fn try_insert_flat(&mut self, key: impl AsRef<str>, value: impl Into<Value> + Debug) {
         let key = key.as_ref();
-        if !self.contains(key) {
-            self.insert(key, value);
+        if !self.as_map().contains_key(key) {
+            self.insert_flat(key, value);
         }
     }
 
@@ -142,7 +186,7 @@ impl LogEvent {
     #[instrument(level = "trace", skip(self))]
     pub fn keys<'a>(&'a self) -> impl Iterator<Item = String> + 'a {
         match &self.fields {
-            Value::Map(map) => util::log::keys(&map),
+            Value::Map(map) => util::log::keys(map),
             _ => unreachable!(),
         }
     }
@@ -160,7 +204,7 @@ impl LogEvent {
     #[instrument(level = "trace", skip(self))]
     pub fn as_map(&self) -> &BTreeMap<String, Value> {
         match &self.fields {
-            Value::Map(map) => &map,
+            Value::Map(map) => map,
             _ => unreachable!(),
         }
     }
@@ -363,6 +407,68 @@ impl Serialize for LogEvent {
     }
 }
 
+impl From<&tracing::Event<'_>> for LogEvent {
+    fn from(event: &tracing::Event<'_>) -> Self {
+        let now = chrono::Utc::now();
+        let mut maker = MakeLogEvent::default();
+        event.record(&mut maker);
+
+        let mut log = maker.0;
+        log.insert("timestamp", now);
+
+        let meta = event.metadata();
+        log.insert(
+            "metadata.kind",
+            if meta.is_event() {
+                Value::Bytes("event".to_string().into())
+            } else if meta.is_span() {
+                Value::Bytes("span".to_string().into())
+            } else {
+                Value::Null
+            },
+        );
+        log.insert("metadata.level", meta.level().to_string());
+        log.insert(
+            "metadata.module_path",
+            meta.module_path()
+                .map_or(Value::Null, |mp| Value::Bytes(mp.to_string().into())),
+        );
+        log.insert("metadata.target", meta.target().to_string());
+
+        log
+    }
+}
+
+#[derive(Debug, Default)]
+struct MakeLogEvent(LogEvent);
+
+impl tracing::field::Visit for MakeLogEvent {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+        self.0.insert(field.name(), format!("{:?}", value));
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.0.insert(field.name(), value);
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        let field = field.name();
+        let converted: Result<i64, _> = value.try_into();
+        match converted {
+            Ok(value) => self.0.insert(field, value),
+            Err(_) => self.0.insert(field, value.to_string()),
+        };
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.0.insert(field.name(), value);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -370,11 +476,196 @@ mod test {
     use serde_json::json;
     use std::str::FromStr;
 
+    // The following two tests assert that renaming a key has no effect if the
+    // keys are equivalent, whether the key exists in the log or not.
+    #[test]
+    fn rename_key_flat_equiv_exists() {
+        let mut fields = BTreeMap::new();
+        fields.insert("one".to_string(), Value::Integer(1_i64));
+        fields.insert("two".to_string(), Value::Integer(2_i64));
+        let expected_fields = fields.clone();
+
+        let mut base = LogEvent::from_parts(fields, EventMetadata::default());
+        base.rename_key_flat("one", "one");
+        let (actual_fields, _) = base.into_parts();
+
+        assert_eq!(expected_fields, actual_fields);
+    }
+    #[test]
+    fn rename_key_flat_equiv_not_exists() {
+        let mut fields = BTreeMap::new();
+        fields.insert("one".to_string(), Value::Integer(1_i64));
+        fields.insert("two".to_string(), Value::Integer(2_i64));
+        let expected_fields = fields.clone();
+
+        let mut base = LogEvent::from_parts(fields, EventMetadata::default());
+        base.rename_key_flat("three", "three");
+        let (actual_fields, _) = base.into_parts();
+
+        assert_eq!(expected_fields, actual_fields);
+    }
+    // Assert that renaming a key has no effect if the key does not originally
+    // exist in the log, when the to -> from keys are not identical.
+    #[test]
+    fn rename_key_flat_not_exists() {
+        let mut fields = BTreeMap::new();
+        fields.insert("one".to_string(), Value::Integer(1_i64));
+        fields.insert("two".to_string(), Value::Integer(2_i64));
+        let expected_fields = fields.clone();
+
+        let mut base = LogEvent::from_parts(fields, EventMetadata::default());
+        base.rename_key_flat("three", "four");
+        let (actual_fields, _) = base.into_parts();
+
+        assert_eq!(expected_fields, actual_fields);
+    }
+    // Assert that renaming a key has the effect of moving the value from one
+    // key name to another if the key exists.
+    #[test]
+    fn rename_key_flat_no_overlap() {
+        let mut fields = BTreeMap::new();
+        fields.insert("one".to_string(), Value::Integer(1_i64));
+        fields.insert("two".to_string(), Value::Integer(2_i64));
+
+        let mut expected_fields = fields.clone();
+        let val = expected_fields.remove("one").unwrap();
+        expected_fields.insert("three".to_string(), val);
+
+        let mut base = LogEvent::from_parts(fields, EventMetadata::default());
+        base.rename_key_flat("one", "three");
+        let (actual_fields, _) = base.into_parts();
+
+        assert_eq!(expected_fields, actual_fields);
+    }
+    // Assert that renaming a key has the effect of moving the value from one
+    // key name to another if the key exists and will overwrite another key if
+    // it exists.
+    #[test]
+    fn rename_key_flat_overlap() {
+        let mut fields = BTreeMap::new();
+        fields.insert("one".to_string(), Value::Integer(1_i64));
+        fields.insert("two".to_string(), Value::Integer(2_i64));
+
+        let mut expected_fields = fields.clone();
+        let val = expected_fields.remove("one").unwrap();
+        expected_fields.insert("two".to_string(), val);
+
+        let mut base = LogEvent::from_parts(fields, EventMetadata::default());
+        base.rename_key_flat("one", "two");
+        let (actual_fields, _) = base.into_parts();
+
+        assert_eq!(expected_fields, actual_fields);
+    }
+
+    #[test]
+    fn insert() {
+        let mut log = LogEvent::default();
+
+        let old = log.insert("foo", "foo");
+
+        assert_eq!(log.get("foo"), Some(&"foo".into()));
+        assert_eq!(old, None);
+    }
+
+    #[test]
+    fn insert_existing() {
+        let mut log = LogEvent::default();
+        log.insert("foo", "foo");
+
+        let old = log.insert("foo", "bar");
+
+        assert_eq!(log.get("foo"), Some(&"bar".into()));
+        assert_eq!(old, Some("foo".into()));
+    }
+
+    #[test]
+    fn try_insert() {
+        let mut log = LogEvent::default();
+
+        log.try_insert("foo", "foo");
+
+        assert_eq!(log.get("foo"), Some(&"foo".into()));
+    }
+
+    #[test]
+    fn try_insert_existing() {
+        let mut log = LogEvent::default();
+        log.insert("foo", "foo");
+
+        log.try_insert("foo", "bar");
+
+        assert_eq!(log.get("foo"), Some(&"foo".into()));
+    }
+
+    #[test]
+    fn try_insert_dotted() {
+        let mut log = LogEvent::default();
+
+        log.try_insert("foo.bar", "foo");
+
+        assert_eq!(log.get("foo.bar"), Some(&"foo".into()));
+        assert_eq!(log.get_flat("foo.bar"), None);
+    }
+
+    #[test]
+    fn try_insert_existing_dotted() {
+        let mut log = LogEvent::default();
+        log.insert("foo.bar", "foo");
+
+        log.try_insert("foo.bar", "bar");
+
+        assert_eq!(log.get("foo.bar"), Some(&"foo".into()));
+        assert_eq!(log.get_flat("foo.bar"), None);
+    }
+
+    #[test]
+    fn try_insert_flat() {
+        let mut log = LogEvent::default();
+
+        log.try_insert_flat("foo", "foo");
+
+        assert_eq!(log.get_flat("foo"), Some(&"foo".into()));
+    }
+
+    #[test]
+    fn try_insert_flat_existing() {
+        let mut log = LogEvent::default();
+        log.insert_flat("foo", "foo");
+
+        log.try_insert_flat("foo", "bar");
+
+        assert_eq!(log.get_flat("foo"), Some(&"foo".into()));
+    }
+
+    #[test]
+    fn try_insert_flat_dotted() {
+        let mut log = LogEvent::default();
+
+        log.try_insert_flat("foo.bar", "foo");
+
+        assert_eq!(log.get_flat("foo.bar"), Some(&"foo".into()));
+        assert_eq!(log.get("foo.bar"), None);
+    }
+
+    #[test]
+    fn try_insert_flat_existing_dotted() {
+        let mut log = LogEvent::default();
+        log.insert_flat("foo.bar", "foo");
+
+        log.try_insert_flat("foo.bar", "bar");
+
+        assert_eq!(log.get_flat("foo.bar"), Some(&"foo".into()));
+        assert_eq!(log.get("foo.bar"), None);
+    }
+
     // This test iterates over the `tests/data/fixtures/log_event` folder and:
-    //   * Ensures the EventLog parsed from bytes and turned into a serde_json::Value are equal to the
-    //     item being just plain parsed as json.
     //
-    // Basically: This test makes sure we aren't mutilating any content users might be sending.
+    //   * Ensures the EventLog parsed from bytes and turned into a
+    //   serde_json::Value are equal to the item being just plain parsed as
+    //   json.
+    //
+    // Basically: This test makes sure we aren't mutilating any content users
+    // might be sending.
     #[test]
     fn json_value_to_vector_log_event_to_json_value() {
         const FIXTURE_ROOT: &str = "tests/data/fixtures/log_event";

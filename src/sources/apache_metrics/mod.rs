@@ -1,5 +1,5 @@
 use crate::{
-    config::{self, GenerateConfig, SourceConfig, SourceContext, SourceDescription},
+    config::{self, GenerateConfig, ProxyConfig, SourceConfig, SourceContext, SourceDescription},
     event::metric::{Metric, MetricKind, MetricValue},
     event::Event,
     http::HttpClient,
@@ -35,7 +35,7 @@ struct ApacheMetricsConfig {
     namespace: String,
 }
 
-pub fn default_scrape_interval_secs() -> u64 {
+pub const fn default_scrape_interval_secs() -> u64 {
     15
 }
 
@@ -77,6 +77,7 @@ impl SourceConfig for ApacheMetricsConfig {
             namespace,
             cx.shutdown,
             cx.out,
+            cx.proxy,
         ))
     }
 
@@ -137,6 +138,7 @@ fn apache_metrics(
     namespace: Option<String>,
     shutdown: ShutdownSignal,
     out: Pipeline,
+    proxy: ProxyConfig,
 ) -> super::Source {
     let out = out.sink_map_err(|error| error!(message = "Error sending metric.", %error));
 
@@ -146,7 +148,7 @@ fn apache_metrics(
             .map(move |_| stream::iter(urls.clone()))
             .flatten()
             .map(move |url| {
-                let client = HttpClient::new(None).expect("HTTPS initialization failed");
+                let client = HttpClient::new(None, &proxy).expect("HTTPS initialization failed");
                 let sanitized_url = url.to_sanitized_string();
 
                 let request = Request::get(&url)
@@ -171,7 +173,7 @@ fn apache_metrics(
                     .filter_map(move |response| {
                         ready(match response {
                             Ok((header, body)) if header.status == hyper::StatusCode::OK => {
-                                emit!(ApacheMetricsRequestCompleted {
+                                emit!(&ApacheMetricsRequestCompleted {
                                     start,
                                     end: Instant::now()
                                 });
@@ -198,7 +200,7 @@ fn apache_metrics(
                                     .filter_map(|res| match res {
                                         Ok(metric) => Some(metric),
                                         Err(e) => {
-                                            emit!(ApacheMetricsParseError {
+                                            emit!(&ApacheMetricsParseError {
                                                 error: e,
                                                 url: &sanitized_url,
                                             });
@@ -207,7 +209,7 @@ fn apache_metrics(
                                     })
                                     .collect::<Vec<_>>();
 
-                                emit!(ApacheMetricsEventReceived {
+                                emit!(&ApacheMetricsEventReceived {
                                     byte_size,
                                     count: metrics.len(),
                                     uri: &sanitized_url,
@@ -215,7 +217,7 @@ fn apache_metrics(
                                 Some(stream::iter(metrics).map(Event::Metric).map(Ok))
                             }
                             Ok((header, _)) => {
-                                emit!(ApacheMetricsErrorResponse {
+                                emit!(&ApacheMetricsErrorResponse {
                                     code: header.status,
                                     url: &sanitized_url,
                                 });
@@ -233,7 +235,7 @@ fn apache_metrics(
                                 )
                             }
                             Err(error) => {
-                                emit!(ApacheMetricsHttpError {
+                                emit!(&ApacheMetricsHttpError {
                                     error,
                                     url: &sanitized_url
                                 });
@@ -359,7 +361,7 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
 
         match metrics.iter().find(|m| m.name() == "up") {
             Some(m) => {
-                assert_eq!(m.data.value, MetricValue::Gauge { value: 1.0 });
+                assert_eq!(m.value(), &MetricValue::Gauge { value: 1.0 });
 
                 match m.tags() {
                     Some(tags) => {
@@ -422,7 +424,7 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
         //
         // https://github.com/Lusitaniae/apache_exporter/blob/712a6796fb84f741ef3cd562dc11418f2ee8b741/apache_exporter.go#L200
         match metrics.iter().find(|m| m.name() == "up") {
-            Some(m) => assert_eq!(m.data.value, MetricValue::Gauge { value: 1.0 }),
+            Some(m) => assert_eq!(m.value(), &MetricValue::Gauge { value: 1.0 }),
             None => error!(message = "Could not find up metric in.", metrics = ?metrics),
         }
     }
@@ -453,7 +455,7 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
             .collect::<Vec<_>>();
 
         match metrics.iter().find(|m| m.name() == "up") {
-            Some(m) => assert_eq!(m.data.value, MetricValue::Gauge { value: 0.0 }),
+            Some(m) => assert_eq!(m.value(), &MetricValue::Gauge { value: 0.0 }),
             None => error!(message = "Could not find up metric in.", metrics = ?metrics),
         }
     }

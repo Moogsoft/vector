@@ -65,7 +65,12 @@ impl Function for Compact {
         ]
     }
 
-    fn compile(&self, mut arguments: ArgumentList) -> Compiled {
+    fn compile(
+        &self,
+        _state: &state::Compiler,
+        _ctx: &FunctionCompileContext,
+        mut arguments: ArgumentList,
+    ) -> Compiled {
         let value = arguments.required("value");
         let recursive = arguments.optional("recursive");
         let null = arguments.optional("null");
@@ -123,7 +128,7 @@ impl Default for CompactOptions {
 impl CompactOptions {
     /// Check if the value is empty according to the given options
     fn is_empty(&self, value: &Value) -> bool {
-        if self.nullish && util::is_nullish(&value) {
+        if self.nullish && util::is_nullish(value) {
             return true;
         }
 

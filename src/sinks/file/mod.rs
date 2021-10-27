@@ -128,7 +128,7 @@ impl SinkConfig for FileSinkConfig {
         &self,
         cx: SinkContext,
     ) -> crate::Result<(super::VectorSink, super::Healthcheck)> {
-        let sink = FileSink::new(&self, cx.acker());
+        let sink = FileSink::new(self, cx.acker());
         Ok((
             super::VectorSink::Stream(Box::new(sink)),
             future::ok(()).boxed(),
@@ -172,7 +172,7 @@ impl FileSink {
         let bytes = match self.path.render(event) {
             Ok(b) => b,
             Err(error) => {
-                emit!(TemplateRenderingFailed {
+                emit!(&TemplateRenderingFailed {
                     error,
                     field: Some("path"),
                     drop_event: true,
@@ -213,7 +213,7 @@ impl FileSink {
                                 }
                             }
 
-                            emit!(FileOpen {
+                            emit!(&FileOpen {
                                 count: 0
                             });
 
@@ -233,7 +233,7 @@ impl FileSink {
                                 error!(message = "Failed to close file.", path = ?path, %error);
                             }
                             drop(expired_file); // ignore close error
-                            emit!(FileOpen {
+                            emit!(&FileOpen {
                                 count: self.files.len()
                             });
                         }
@@ -283,7 +283,7 @@ impl FileSink {
             let outfile = OutFile::new(file, self.compression);
 
             self.files.insert_at(path.clone(), outfile, next_deadline);
-            emit!(FileOpen {
+            emit!(&FileOpen {
                 count: self.files.len()
             });
             self.files.get_mut(&path).unwrap()
@@ -336,8 +336,10 @@ async fn write_event_to_file(
 
 #[async_trait]
 impl StreamSink for FileSink {
-    async fn run(&mut self, input: BoxStream<'_, Event>) -> Result<(), ()> {
-        FileSink::run(self, input).await.expect("file sink error");
+    async fn run(mut self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
+        FileSink::run(&mut self, input)
+            .await
+            .expect("file sink error");
         Ok(())
     }
 }
@@ -427,7 +429,7 @@ mod tests {
 
         let mut sink = FileSink::new(&config, Acker::Null);
 
-        let (mut input, _events) = random_events_with_stream(32, 8);
+        let (mut input, _events) = random_events_with_stream(32, 8, None);
         input[0].as_mut_log().insert("date", "2019-26-07");
         input[0].as_mut_log().insert("level", "warning");
         input[1].as_mut_log().insert("date", "2019-26-07");

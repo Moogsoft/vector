@@ -6,7 +6,7 @@ use std::{
 
 // TODO: if we had `Value` implement `Eq` and `Hash`, the implementation here
 // would be much easier. The issue is with `f64` type. We should consider using
-// a newtype for `f64` there that'd implement `Eq` and `Hash` is it's safe, for
+// a newtype for `f64` there that'd implement `Eq` and `Hash` if it's safe, for
 // example `NormalF64`, and guard the values with `val.is_normal() == true`
 // invariant.
 // See also: https://internals.rust-lang.org/t/f32-f64-should-implement-hash/5436/32
@@ -58,7 +58,7 @@ fn value_eq(this: &Value, other: &Value) -> bool {
         (Value::Null, Value::Null) => true,
         // Non-trivial.
         (Value::Float(this), Value::Float(other)) => f64_eq(*this, *other),
-        (Value::Array(this), Value::Array(other)) => array_eq(&this, &other),
+        (Value::Array(this), Value::Array(other)) => array_eq(this, other),
         (Value::Map(this), Value::Map(other)) => map_eq(this, other),
         // Type mismatch.
         _ => false,
@@ -125,7 +125,7 @@ fn hash_value<H: Hasher>(hasher: &mut H, value: &Value) {
         Value::Timestamp(val) => val.hash(hasher),
         // Non-trivial.
         Value::Float(val) => hash_f64(hasher, *val),
-        Value::Array(val) => hash_array(hasher, &val),
+        Value::Array(val) => hash_array(hasher, val),
         Value::Map(val) => hash_map(hasher, val),
         Value::Null => hash_null(hasher),
     }

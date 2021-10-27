@@ -29,6 +29,8 @@
 //       `Encoder` that defines some `encode` function which this config then calls internally as
 //       part of it's own (yet to be written) `encode() -> Vec<u8>` function.
 
+mod codec;
+pub use codec::StandardEncodings;
 mod config;
 pub use config::EncodingConfig;
 mod with_default;
@@ -39,13 +41,20 @@ use crate::{
     Result,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, fmt::Debug};
+use std::{fmt::Debug, io};
+
+/// Encodes an event.
+pub trait Encoder {
+    /// Encodes an individual event to the provided writer.
+    fn encode_event(&self, event: Event, writer: &mut dyn io::Write) -> io::Result<()>;
+}
 
 /// The behavior of a encoding configuration.
-pub trait EncodingConfiguration<E> {
+pub trait EncodingConfiguration {
+    type Codec;
     // Required Accessors
 
-    fn codec(&self) -> &E;
+    fn codec(&self) -> &Self::Codec;
     fn schema(&self) -> &Option<String>;
     // TODO(2410): Using PathComponents here is a hack for #2407, #2410 should fix this fully.
     fn only_fields(&self) -> &Option<Vec<Vec<PathComponent>>>;
@@ -56,7 +65,7 @@ pub trait EncodingConfiguration<E> {
         if let Some(only_fields) = &self.only_fields() {
             match event {
                 Event::Log(log_event) => {
-                    let to_remove = log_event
+                    let mut to_remove = log_event
                         .keys()
                         .filter(|field| {
                             let field_path = PathIter::new(field).collect::<Vec<_>>();
@@ -65,9 +74,15 @@ pub trait EncodingConfiguration<E> {
                                 field_path.starts_with(&only[..])
                             })
                         })
-                        .collect::<VecDeque<_>>();
+                        .collect::<Vec<_>>();
+
+                    // reverse sort so that we delete array elements at the end first rather than
+                    // the start so that any `nulls` at the end are dropped and empty arrays are
+                    // pruned
+                    to_remove.sort_by(|a, b| b.cmp(a));
+
                     for removal in to_remove {
-                        log_event.remove(removal);
+                        log_event.remove_prune(removal, true);
                     }
                 }
                 Event::Metric(_) => {
@@ -146,6 +161,17 @@ pub trait EncodingConfiguration<E> {
     }
 }
 
+impl<E> Encoder for E
+where
+    E: EncodingConfiguration,
+    E::Codec: Encoder,
+{
+    fn encode_event(&self, mut event: Event, writer: &mut dyn io::Write) -> io::Result<()> {
+        self.apply_rules(&mut event);
+        self.codec().encode_event(event, writer)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TimestampFormat {
@@ -158,6 +184,7 @@ mod tests {
     use super::*;
     use crate::config::log_schema;
     use indoc::indoc;
+    use shared::btreemap;
 
     #[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone)]
     enum TestEncoding {
@@ -213,7 +240,7 @@ mod tests {
 
     const TOML_EXCEPT_FIELD: &str = indoc! {r#"
         encoding.codec = "Snoot"
-        encoding.except_fields = ["a.b.c", "b", "c[0].y"]
+        encoding.except_fields = ["a.b.c", "b", "c[0].y", "d\\.z", "e"]
     "#};
     #[test]
     fn test_except() {
@@ -230,12 +257,17 @@ mod tests {
             log.insert("b[1].x", 1);
             log.insert("c[0].x", 1);
             log.insert("c[0].y", 1);
+            log.insert("d\\.z", 1);
+            log.insert("e.a", 1);
+            log.insert("e.b", 1);
         }
         config.encoding.apply_rules(&mut event);
         assert!(!event.as_mut_log().contains("a.b.c"));
         assert!(!event.as_mut_log().contains("b"));
         assert!(!event.as_mut_log().contains("b[1].x"));
         assert!(!event.as_mut_log().contains("c[0].y"));
+        assert!(!event.as_mut_log().contains("d\\.z"));
+        assert!(!event.as_mut_log().contains("e.a"));
 
         assert!(event.as_mut_log().contains("a.b.d"));
         assert!(event.as_mut_log().contains("c[0].x"));
@@ -243,7 +275,7 @@ mod tests {
 
     const TOML_ONLY_FIELD: &str = indoc! {r#"
         encoding.codec = "Snoot"
-        encoding.only_fields = ["a.b.c", "b", "c[0].y"]
+        encoding.only_fields = ["a.b.c", "b", "c[0].y", "g\\.z"]
     "#};
     #[test]
     fn test_only() {
@@ -260,15 +292,29 @@ mod tests {
             log.insert("b[1].x", 1);
             log.insert("c[0].x", 1);
             log.insert("c[0].y", 1);
+            log.insert("d.y", 1);
+            log.insert("d.z", 1);
+            log.insert("e[0]", 1);
+            log.insert("e[1]", 1);
+            log.insert("f\\.z", 1);
+            log.insert("g\\.z", 1);
+            log.insert("h", btreemap! {});
+            log.insert("i", Vec::<Value>::new());
         }
         config.encoding.apply_rules(&mut event);
         assert!(event.as_mut_log().contains("a.b.c"));
         assert!(event.as_mut_log().contains("b"));
         assert!(event.as_mut_log().contains("b[1].x"));
         assert!(event.as_mut_log().contains("c[0].y"));
+        assert!(event.as_mut_log().contains("g\\.z"));
 
         assert!(!event.as_mut_log().contains("a.b.d"));
         assert!(!event.as_mut_log().contains("c[0].x"));
+        assert!(!event.as_mut_log().contains("d"));
+        assert!(!event.as_mut_log().contains("e"));
+        assert!(!event.as_mut_log().contains("f"));
+        assert!(!event.as_mut_log().contains("h"));
+        assert!(!event.as_mut_log().contains("i"));
     }
 
     const TOML_TIMESTAMP_FORMAT: &str = indoc! {r#"

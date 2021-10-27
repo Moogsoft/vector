@@ -1,18 +1,17 @@
 use crate::{
-    config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
+    config::{DataType, GenerateConfig, ProxyConfig, SinkConfig, SinkContext, SinkDescription},
     event::Event,
     rusoto::{self, AwsAuthentication, RegionOrEndpoint},
     sinks::util::{
         encoding::{EncodingConfig, EncodingConfiguration},
         retries::RetryLogic,
-        sink::Response,
+        sink::{self, Response},
         BatchConfig, BatchSettings, Compression, EncodedEvent, EncodedLength, TowerRequestConfig,
         VecBuffer,
     },
 };
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream, FutureExt, Sink, SinkExt, StreamExt};
-use lazy_static::lazy_static;
 use rusoto_core::RusotoError;
 use rusoto_firehose::{
     DescribeDeliveryStreamError, DescribeDeliveryStreamInput, KinesisFirehose,
@@ -27,6 +26,11 @@ use std::{
 };
 use tower::Service;
 use tracing_futures::Instrument;
+
+// AWS Kinesis Firehose API accepts payloads up to 4MB or 500 events
+// https://docs.aws.amazon.com/firehose/latest/dev/limits.html
+const MAX_PAYLOAD_SIZE: usize = 4_194_304_usize;
+const MAX_PAYLOAD_EVENTS: usize = 500_usize;
 
 #[derive(Clone)]
 pub struct KinesisFirehoseService {
@@ -53,13 +57,6 @@ pub struct KinesisFirehoseSinkConfig {
     pub auth: AwsAuthentication,
 }
 
-lazy_static! {
-    static ref REQUEST_DEFAULTS: TowerRequestConfig = TowerRequestConfig {
-        timeout_secs: Some(30),
-        ..Default::default()
-    };
-}
-
 #[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum Encoding {
@@ -82,6 +79,20 @@ impl GenerateConfig for KinesisFirehoseSinkConfig {
     }
 }
 
+#[derive(Debug, PartialEq, Snafu)]
+enum BuildError {
+    #[snafu(display(
+        "Batch max size is too high. The value must be {} bytes or less",
+        MAX_PAYLOAD_SIZE
+    ))]
+    BatchMaxSize,
+    #[snafu(display(
+        "Batch max events is too high. The value must be {} or less",
+        MAX_PAYLOAD_EVENTS
+    ))]
+    BatchMaxEvents,
+}
+
 #[async_trait::async_trait]
 #[typetag::serde(name = "aws_kinesis_firehose")]
 impl SinkConfig for KinesisFirehoseSinkConfig {
@@ -89,7 +100,7 @@ impl SinkConfig for KinesisFirehoseSinkConfig {
         &self,
         cx: SinkContext,
     ) -> crate::Result<(super::VectorSink, super::Healthcheck)> {
-        let client = self.create_client()?;
+        let client = self.create_client(&cx.proxy)?;
         let healthcheck = self.clone().healthcheck(client.clone()).boxed();
         let sink = KinesisFirehoseService::new(self.clone(), client, cx)?;
         Ok((super::VectorSink::Sink(Box::new(sink)), healthcheck))
@@ -127,10 +138,10 @@ impl KinesisFirehoseSinkConfig {
         }
     }
 
-    fn create_client(&self) -> crate::Result<KinesisFirehoseClient> {
+    fn create_client(&self, proxy: &ProxyConfig) -> crate::Result<KinesisFirehoseClient> {
         let region = (&self.region).try_into()?;
 
-        let client = rusoto::client()?;
+        let client = rusoto::client(proxy)?;
         let creds = self.auth.build(&region, self.assume_role.clone())?;
 
         let client = rusoto_core::Client::new_with_encoding(creds, client, self.compression.into());
@@ -144,16 +155,25 @@ impl KinesisFirehoseService {
         client: KinesisFirehoseClient,
         cx: SinkContext,
     ) -> crate::Result<impl Sink<Event, Error = ()>> {
+        let batch_config = config.batch.use_size_as_bytes()?;
+
+        if batch_config.max_bytes.unwrap_or_default() > MAX_PAYLOAD_SIZE {
+            return Err(Box::new(BuildError::BatchMaxSize));
+        }
+
+        if batch_config.max_events.unwrap_or_default() > MAX_PAYLOAD_EVENTS {
+            return Err(Box::new(BuildError::BatchMaxEvents));
+        }
+
         let batch = BatchSettings::default()
             .bytes(4_000_000)
             .events(500)
             .timeout(1)
-            .parse_config(config.batch)?;
-        let request = config.request.unwrap_with(&REQUEST_DEFAULTS);
+            .parse_config(batch_config)?;
+
+        let request = config.request.unwrap_with(&TowerRequestConfig::default());
         let encoding = config.encoding.clone();
-
         let kinesis = KinesisFirehoseService { client, config };
-
         let sink = request
             .batch_sink(
                 KinesisFirehoseRetryLogic,
@@ -161,6 +181,7 @@ impl KinesisFirehoseService {
                 VecBuffer::new(batch.size),
                 batch.timeout,
                 cx.acker(),
+                sink::StdServiceLogic::default(),
             )
             .sink_map_err(|error| error!(message = "Fatal kinesis firehose sink error.", %error))
             .with_flat_map(move |e| stream::iter(Some(encode_event(e, &encoding))).map(Ok));
@@ -269,6 +290,62 @@ mod tests {
     }
 
     #[test]
+    fn check_batch_size() {
+        let config = KinesisFirehoseSinkConfig {
+            stream_name: String::from("test"),
+            region: RegionOrEndpoint::with_endpoint("http://localhost:4566".into()),
+            encoding: EncodingConfig::from(Encoding::Json),
+            compression: Compression::None,
+            batch: BatchConfig {
+                max_bytes: Some(MAX_PAYLOAD_SIZE + 1),
+                ..Default::default()
+            },
+            request: Default::default(),
+            assume_role: None,
+            auth: Default::default(),
+        };
+
+        let cx = SinkContext::new_test();
+
+        let client = config.create_client(&cx.proxy).unwrap();
+
+        let res = KinesisFirehoseService::new(config, client, cx);
+
+        assert_eq!(
+            res.err().and_then(|e| e.downcast::<BuildError>().ok()),
+            Some(Box::new(BuildError::BatchMaxSize))
+        );
+    }
+
+    #[test]
+    fn check_batch_events() {
+        let config = KinesisFirehoseSinkConfig {
+            stream_name: String::from("test"),
+            region: RegionOrEndpoint::with_endpoint("http://localhost:4566".into()),
+            encoding: EncodingConfig::from(Encoding::Json),
+            compression: Compression::None,
+            batch: BatchConfig {
+                max_events: Some(MAX_PAYLOAD_EVENTS + 1),
+                ..Default::default()
+            },
+            request: Default::default(),
+            assume_role: None,
+            auth: Default::default(),
+        };
+
+        let cx = SinkContext::new_test();
+
+        let client = config.create_client(&cx.proxy).unwrap();
+
+        let res = KinesisFirehoseService::new(config, client, cx);
+
+        assert_eq!(
+            res.err().and_then(|e| e.downcast::<BuildError>().ok()),
+            Some(Box::new(BuildError::BatchMaxEvents))
+        );
+    }
+
+    #[test]
     fn firehose_encode_event_text() {
         let message = "hello world".to_string();
         let event = encode_event(message.clone().into(), &Encoding::Text.into());
@@ -342,10 +419,10 @@ mod integration_tests {
 
         let cx = SinkContext::new_test();
 
-        let client = config.create_client().unwrap();
+        let client = config.create_client(&cx.proxy).unwrap();
         let mut sink = KinesisFirehoseService::new(config, client, cx).unwrap();
 
-        let (input, events) = random_events_with_stream(100, 100);
+        let (input, events) = random_events_with_stream(100, 100, None);
         let mut events = events.map(Ok);
 
         let _ = sink.send_all(&mut events).await.unwrap();
@@ -384,6 +461,7 @@ mod integration_tests {
         let hits = response["hits"]["hits"]
             .as_array()
             .expect("Elasticsearch response does not include hits->hits");
+        #[allow(clippy::needless_collect)] // https://github.com/rust-lang/rust-clippy/issues/6909
         let input = input
             .into_iter()
             .map(|rec| serde_json::to_value(&rec.into_log()).unwrap())
@@ -392,7 +470,7 @@ mod integration_tests {
             let hit = hit
                 .get("_source")
                 .expect("Elasticsearch hit missing _source");
-            assert!(input.contains(&hit));
+            assert!(input.contains(hit));
         }
     }
 

@@ -499,7 +499,7 @@ mod tests {
         token = "my-token"
         database = "my-database"
     "#;
-        let config: InfluxDbTestConfig = toml::from_str(&config).unwrap();
+        let config: InfluxDbTestConfig = toml::from_str(config).unwrap();
         let settings = influxdb_settings(config.influxdb1_settings, config.influxdb2_settings);
         assert_eq!(
             format!("{}", settings.expect_err("expected error")),
@@ -511,7 +511,7 @@ mod tests {
     fn test_influxdb_settings_missing() {
         let config = r#"
     "#;
-        let config: InfluxDbTestConfig = toml::from_str(&config).unwrap();
+        let config: InfluxDbTestConfig = toml::from_str(config).unwrap();
         let settings = influxdb_settings(config.influxdb1_settings, config.influxdb2_settings);
         assert_eq!(
             format!("{}", settings.expect_err("expected error")),
@@ -524,7 +524,7 @@ mod tests {
         let config = r#"
         database = "my-database"
     "#;
-        let config: InfluxDbTestConfig = toml::from_str(&config).unwrap();
+        let config: InfluxDbTestConfig = toml::from_str(config).unwrap();
         let _ = influxdb_settings(config.influxdb1_settings, config.influxdb2_settings).unwrap();
     }
 
@@ -535,7 +535,7 @@ mod tests {
         org = "my-org"
         token = "my-token"
     "#;
-        let config: InfluxDbTestConfig = toml::from_str(&config).unwrap();
+        let config: InfluxDbTestConfig = toml::from_str(config).unwrap();
         let _ = influxdb_settings(config.influxdb1_settings, config.influxdb2_settings).unwrap();
     }
 
@@ -814,6 +814,7 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use crate::{
+        config::ProxyConfig,
         http::HttpClient,
         sinks::influxdb::{
             healthcheck,
@@ -833,7 +834,8 @@ mod integration_tests {
             bucket: BUCKET.to_string(),
             token: TOKEN.to_string(),
         });
-        let client = HttpClient::new(None).unwrap();
+        let proxy = ProxyConfig::default();
+        let client = HttpClient::new(None, &proxy).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
@@ -852,7 +854,8 @@ mod integration_tests {
             bucket: BUCKET.to_string(),
             token: TOKEN.to_string(),
         });
-        let client = HttpClient::new(None).unwrap();
+        let proxy = ProxyConfig::default();
+        let client = HttpClient::new(None, &proxy).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
@@ -871,7 +874,8 @@ mod integration_tests {
             password: None,
         });
         let influxdb2_settings = None;
-        let client = HttpClient::new(None).unwrap();
+        let proxy = ProxyConfig::default();
+        let client = HttpClient::new(None, &proxy).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
@@ -890,7 +894,8 @@ mod integration_tests {
             password: None,
         });
         let influxdb2_settings = None;
-        let client = HttpClient::new(None).unwrap();
+        let proxy = ProxyConfig::default();
+        let client = HttpClient::new(None, &proxy).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()

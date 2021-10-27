@@ -93,7 +93,7 @@ impl Lookup {
     #[instrument(level = "trace")]
     pub fn push(&mut self, segment: Segment) {
         trace!(length = %self.segments.len(), "Pushing.");
-        self.segments.push(segment)
+        self.segments.push(segment);
     }
 
     #[instrument(level = "trace")]
@@ -105,35 +105,6 @@ impl Lookup {
     #[instrument(level = "trace")]
     pub fn iter(&self) -> Iter<'_, Segment> {
         self.segments.iter()
-    }
-
-    #[instrument(level = "trace")]
-    pub fn from_indexmap(
-        values: IndexMap<String, TomlValue>,
-    ) -> crate::Result<IndexMap<Lookup, Value>> {
-        let mut discoveries = IndexMap::new();
-        for (key, value) in values {
-            Self::recursive_step(Lookup::try_from(key)?, value, &mut discoveries)?;
-        }
-        Ok(discoveries)
-    }
-
-    #[instrument(level = "trace")]
-    pub fn from_toml_table(value: TomlValue) -> crate::Result<IndexMap<Lookup, Value>> {
-        let mut discoveries = IndexMap::new();
-        match value {
-            TomlValue::Table(map) => {
-                for (key, value) in map {
-                    Self::recursive_step(Lookup::try_from(key)?, value, &mut discoveries)?;
-                }
-                Ok(discoveries)
-            }
-            _ => Err(format!(
-                "A TOML table must be passed to the `from_toml_table` function. Passed: {:?}",
-                value
-            )
-            .into()),
-        }
     }
 
     #[instrument(level = "trace")]

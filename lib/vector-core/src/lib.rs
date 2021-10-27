@@ -19,6 +19,7 @@
 #![allow(clippy::must_use_candidate)] // many false positives in this package
 #![allow(clippy::non_ascii_literal)] // using unicode literals is a-okay in vector
 #![allow(clippy::unnested_or_patterns)] // nightly-only feature as of 1.51.0
+#![allow(clippy::type_complexity)] // long-types happen, especially in async code
 
 #[cfg(feature = "api")]
 pub mod api;
@@ -26,8 +27,20 @@ pub mod config;
 pub mod event;
 pub mod mapping;
 pub mod metrics;
+pub mod sink;
+pub mod source;
 #[cfg(test)]
 mod test_util;
+pub mod transform;
+pub use buffers;
+pub mod partition;
+pub mod serde;
+pub mod stream;
+pub mod time;
+pub use core_common::byte_size_of::ByteSizeOf;
+pub use core_common::internal_event;
+
+use std::path::PathBuf;
 
 #[macro_use]
 extern crate derivative;
@@ -35,6 +48,10 @@ extern crate derivative;
 extern crate pest_derive;
 #[macro_use]
 extern crate tracing;
+
+pub fn default_data_dir() -> Option<PathBuf> {
+    Some(PathBuf::from("/var/lib/vector/"))
+}
 
 /// Vector's basic error type, dynamically dispatched and safe to send across
 /// threads.

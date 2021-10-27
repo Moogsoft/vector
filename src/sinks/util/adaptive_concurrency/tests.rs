@@ -4,10 +4,10 @@ use super::controller::ControllerStatistics;
 use crate::{
     config::{self, DataType, SinkConfig, SinkContext},
     event::{metric::MetricValue, Event},
-    metrics::{self, capture_metrics, get_controller},
+    metrics::{self},
     sinks::{
         util::{
-            retries::RetryLogic, BatchSettings, Concurrency, EncodedEvent, EncodedLength,
+            retries::RetryLogic, sink, BatchSettings, Concurrency, EncodedEvent, EncodedLength,
             TowerRequestConfig, VecBuffer,
         },
         Healthcheck, VectorSink,
@@ -20,6 +20,7 @@ use crate::{
 };
 use core::task::Context;
 use futures::{
+    channel::oneshot,
     future::{self, BoxFuture},
     stream, FutureExt, SinkExt,
 };
@@ -82,16 +83,17 @@ impl LimitParams {
     }
 
     fn scale(&self, level: usize) -> f64 {
-        (level - 1) as f64 * self.scale
-            + self
-                .knee_start
+        ((level - 1) as f64).mul_add(
+            self.scale,
+            self.knee_start
                 .map(|knee| {
                     self.knee_exp
                         .unwrap_or_else(|| self.scale + 1.0)
                         .powf(level.saturating_sub(knee) as f64)
                         - 1.0
                 })
-                .unwrap_or(0.0)
+                .unwrap_or(0.0),
+        )
     }
 }
 
@@ -101,7 +103,8 @@ struct TestParams {
     requests: usize,
 
     // The time interval between requests.
-    interval: Option<f64>,
+    #[serde(default = "default_interval")]
+    interval: f64,
 
     // The delay is the base time every request takes return.
     delay: f64,
@@ -123,11 +126,15 @@ struct TestParams {
     concurrency: Concurrency,
 }
 
-fn default_concurrency() -> Concurrency {
+const fn default_interval() -> f64 {
+    0.0
+}
+
+const fn default_concurrency() -> Concurrency {
     Concurrency::Adaptive
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 struct TestConfig {
     request: TowerRequestConfig,
     params: TestParams,
@@ -136,7 +143,7 @@ struct TestConfig {
     // test and retained past the completion of the topology. So, they
     // are created by `Default` and may be cloned to retain a handle.
     #[serde(skip)]
-    stats: Arc<Mutex<Statistics>>,
+    control: Arc<Mutex<TestController>>,
     // Oh, the horror!
     #[serde(skip)]
     controller_stats: Arc<Mutex<Arc<Mutex<ControllerStatistics>>>>,
@@ -155,6 +162,7 @@ impl SinkConfig for TestConfig {
                 VecBuffer::new(batch.size),
                 batch.timeout,
                 cx.acker(),
+                sink::StdServiceLogic::default(),
             )
             .with_flat_map(|event| stream::iter(Some(Ok(EncodedEvent::new(event)))))
             .sink_map_err(|error| panic!("Fatal test sink error: {}", error));
@@ -187,24 +195,25 @@ impl SinkConfig for TestConfig {
 
 #[derive(Clone, Debug)]
 struct TestSink {
-    stats: Arc<Mutex<Statistics>>,
+    control: Arc<Mutex<TestController>>,
     params: TestParams,
 }
 
 impl TestSink {
     fn new(config: &TestConfig) -> Self {
         Self {
-            stats: Arc::clone(&config.stats),
+            control: Arc::clone(&config.control),
             params: config.params,
         }
     }
 
     fn delay_at(&self, in_flight: usize, rate: usize) -> f64 {
         self.params.delay
-            * (1.0
-                + self.params.concurrency_limit_params.scale(in_flight)
-                + self.params.rate.scale(rate)
-                + thread_rng().sample::<f64, _>(Exp1) * self.params.jitter)
+            * thread_rng().sample::<f64, _>(Exp1).mul_add(
+                self.params.jitter,
+                1.0 + self.params.concurrency_limit_params.scale(in_flight)
+                    + self.params.rate.scale(rate),
+            )
     }
 }
 
@@ -229,7 +238,8 @@ impl Service<Vec<Event>> for TestSink {
 
     fn call(&mut self, _request: Vec<Event>) -> Self::Future {
         let now = Instant::now();
-        let mut stats = self.stats.lock().expect("Poisoned stats lock");
+        let mut control = self.control.lock().expect("Poisoned control lock");
+        let stats = &mut control.stats;
         stats.start_request(now);
         let in_flight = stats.in_flight.level();
         let rate = stats.requests.len();
@@ -242,14 +252,14 @@ impl Service<Vec<Event>> for TestSink {
         match action {
             None => {
                 let delay = self.delay_at(in_flight, rate);
-                respond_after(Ok(Response::Ok), delay, Arc::clone(&self.stats))
+                respond_after(Ok(Response::Ok), delay, Arc::clone(&self.control))
             }
             Some(Action::Defer) => {
                 let delay = self.delay_at(1, 1);
-                respond_after(Err(Error::Deferred), delay, Arc::clone(&self.stats))
+                respond_after(Err(Error::Deferred), delay, Arc::clone(&self.control))
             }
             Some(Action::Drop) => {
-                stats.end_request(now, false);
+                control.end_request(now, false);
                 Box::pin(pending())
             }
         }
@@ -259,12 +269,12 @@ impl Service<Vec<Event>> for TestSink {
 fn respond_after(
     response: Result<Response, Error>,
     delay: f64,
-    stats: Arc<Mutex<Statistics>>,
+    control: Arc<Mutex<TestController>>,
 ) -> BoxFuture<'static, Result<Response, Error>> {
     Box::pin(async move {
         sleep(Duration::from_secs_f64(delay)).await;
-        let mut stats = stats.lock().expect("Poisoned stats lock");
-        stats.end_request(Instant::now(), matches!(response, Ok(Response::Ok)));
+        let mut control = control.lock().expect("Poisoned control lock");
+        control.end_request(Instant::now(), matches!(response, Ok(Response::Ok)));
         response
     })
 }
@@ -292,6 +302,13 @@ impl RetryLogic for TestRetryLogic {
     }
 }
 
+#[derive(Debug)]
+struct TestController {
+    todo: usize,
+    send_done: Option<oneshot::Sender<()>>,
+    stats: Statistics,
+}
+
 #[derive(Default)]
 struct Statistics {
     completed: usize,
@@ -302,12 +319,31 @@ struct Statistics {
 
 impl fmt::Debug for Statistics {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        fmt.debug_struct("Statistics")
+        fmt.debug_struct("SharedData")
             .field("completed", &self.completed)
             .field("in_flight", &self.in_flight)
             .field("rate", &self.rate.stats())
             .field("requests", &self.requests.len())
             .finish()
+    }
+}
+
+impl TestController {
+    fn new(todo: usize, send_done: oneshot::Sender<()>) -> Self {
+        Self {
+            todo,
+            send_done: Some(send_done),
+            stats: Default::default(),
+        }
+    }
+
+    fn end_request(&mut self, now: Instant, completed: bool) {
+        self.stats.end_request(now, completed);
+        if self.stats.completed >= self.todo {
+            if let Some(done) = self.send_done.take() {
+                done.send(()).expect("Could not send done signal");
+            }
+        }
     }
 }
 
@@ -352,7 +388,8 @@ struct TestResults {
 }
 
 async fn run_test(params: TestParams) -> TestResults {
-    let _ = metrics::init();
+    let _ = metrics::init_test();
+    let (send_done, is_done) = oneshot::channel();
 
     let test_config = TestConfig {
         request: TowerRequestConfig {
@@ -362,10 +399,11 @@ async fn run_test(params: TestParams) -> TestResults {
             ..Default::default()
         },
         params,
-        ..Default::default()
+        control: Arc::new(Mutex::new(TestController::new(params.requests, send_done))),
+        controller_stats: Default::default(),
     };
 
-    let stats = Arc::clone(&test_config.stats);
+    let control = Arc::clone(&test_config.control);
     let cstats = Arc::clone(&test_config.controller_stats);
 
     let mut config = config::Config::builder();
@@ -376,19 +414,16 @@ async fn run_test(params: TestParams) -> TestResults {
 
     let (topology, _crash) = start_topology(config.build().unwrap(), false).await;
 
-    let controller = get_controller().unwrap();
+    let controller = metrics::Controller::get().unwrap();
 
-    // This is crude and dumb, but it works, and the tests run fast and
-    // the results are highly repeatable.
-    while stats.lock().expect("Poisoned stats lock").completed < params.requests {
-        time::advance(Duration::from_millis(0)).await;
-    }
+    is_done.await.expect("Test failed to complete");
     topology.stop().await;
 
-    let stats = Arc::try_unwrap(stats)
-        .expect("Failed to unwrap stats Arc")
+    let control = Arc::try_unwrap(control)
+        .expect("Failed to unwrap control Arc")
         .into_inner()
-        .expect("Failed to unwrap stats Mutex");
+        .expect("Failed to unwrap control Mutex");
+    let stats = control.stats;
 
     let cstats = Arc::try_unwrap(cstats)
         .expect("Failed to unwrap controller_stats Arc")
@@ -399,44 +434,37 @@ async fn run_test(params: TestParams) -> TestResults {
         .into_inner()
         .expect("Failed to unwrap controller_stats Mutex");
 
-    let metrics = capture_metrics(&controller)
-        .map(Event::into_metric)
-        .map(|event| (event.name().to_string(), event))
+    let metrics = controller
+        .capture_metrics()
+        .map(|metric| (metric.name().to_string(), metric))
         .collect::<HashMap<_, _>>();
     // Ensure basic statistics are captured, don't actually examine them
     assert!(matches!(
         metrics
             .get("adaptive_concurrency_observed_rtt")
             .unwrap()
-            .data
-            .value,
-        MetricValue::AggregatedHistogram { .. }
+            .value(),
+        &MetricValue::AggregatedHistogram { .. }
     ));
     assert!(matches!(
         metrics
             .get("adaptive_concurrency_averaged_rtt")
             .unwrap()
-            .data
-            .value,
-        MetricValue::AggregatedHistogram { .. }
+            .value(),
+        &MetricValue::AggregatedHistogram { .. }
     ));
     if params.concurrency == Concurrency::Adaptive {
         assert!(matches!(
-            metrics
-                .get("adaptive_concurrency_limit")
-                .unwrap()
-                .data
-                .value,
-            MetricValue::AggregatedHistogram { .. }
+            metrics.get("adaptive_concurrency_limit").unwrap().value(),
+            &MetricValue::AggregatedHistogram { .. }
         ));
     }
     assert!(matches!(
         metrics
             .get("adaptive_concurrency_in_flight")
             .unwrap()
-            .data
-            .value,
-        MetricValue::AggregatedHistogram { .. }
+            .value(),
+        &MetricValue::AggregatedHistogram { .. }
     ));
 
     TestResults { stats, cstats }

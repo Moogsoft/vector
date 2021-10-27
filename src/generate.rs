@@ -1,6 +1,6 @@
 use crate::config::{
-    component::ExampleError, default_data_dir, GlobalOptions, SinkDescription,
-    SinkHealthcheckOptions, SourceDescription, TransformDescription,
+    component::ExampleError, SinkDescription, SinkHealthcheckOptions, SourceDescription,
+    TransformDescription,
 };
 use colored::*;
 use indexmap::IndexMap;
@@ -12,6 +12,8 @@ use std::{
 };
 use structopt::StructOpt;
 use toml::{map::Map, Value};
+use vector_core::config::GlobalOptions;
+use vector_core::default_data_dir;
 
 #[derive(StructOpt, Debug)]
 #[structopt(rename_all = "kebab-case")]
@@ -178,7 +180,7 @@ fn generate_example(
             } else {
                 vec![transform_names
                     .get(i - 1)
-                    .unwrap_or(&"component-name".to_owned())
+                    .unwrap_or(&"component-id".to_owned())
                     .to_owned()]
             };
 
@@ -261,7 +263,7 @@ fn generate_example(
                                 None
                             }
                         })
-                        .unwrap_or_else(|| vec!["component-name".to_owned()]),
+                        .unwrap_or_else(|| vec!["component-id".to_owned()]),
                     buffer: crate::buffers::BufferConfig::default(),
                     healthcheck: SinkHealthcheckOptions::default(),
                     inner: example,
@@ -439,6 +441,12 @@ mod tests {
                 max_length = 102400
                 type = "stdin"
 
+                [sources.source0.decoding]
+                codec = "bytes"
+
+                [sources.source0.framing]
+                method = "newline_delimited"
+
                 [transforms.transform0]
                 inputs = ["source0"]
                 drop_field = true
@@ -471,6 +479,12 @@ mod tests {
                 [sources.source0]
                 max_length = 102400
                 type = "stdin"
+
+                [sources.source0.decoding]
+                codec = "bytes"
+
+                [sources.source0.framing]
+                method = "newline_delimited"
 
                 [transforms.transform0]
                 inputs = ["source0"]
@@ -505,6 +519,12 @@ mod tests {
                 max_length = 102400
                 type = "stdin"
 
+                [sources.source0.decoding]
+                codec = "bytes"
+
+                [sources.source0.framing]
+                method = "newline_delimited"
+
                 [sinks.sink0]
                 inputs = ["source0"]
                 target = "stdout"
@@ -529,7 +549,7 @@ mod tests {
             Ok(indoc! {r#"data_dir = "/var/lib/vector/"
 
                 [sinks.sink0]
-                inputs = ["component-name"]
+                inputs = ["component-id"]
                 target = "stdout"
                 type = "console"
 

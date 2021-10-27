@@ -13,8 +13,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use flate2::read::MultiGzDecoder;
 use futures::{stream, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use http::StatusCode;
-use serde::{de, Deserialize, Serialize};
-use serde_json::{de::IoRead, json, Deserializer, Value as JsonValue};
+use serde::{Deserialize, Serialize};
+use serde_json::{de::Read as JsonRead, json, Deserializer, Value as JsonValue};
 use snafu::Snafu;
 use std::{
     collections::HashMap,
@@ -38,8 +38,10 @@ pub struct SplunkConfig {
     /// Local address on which to listen
     #[serde(default = "default_socket_address")]
     address: SocketAddr,
-    /// Splunk HEC token
+    /// Splunk HEC token. Deprecated - use `valid_tokens` instead
     token: Option<String>,
+    /// A list of tokens to accept. Omit this to accept any token
+    valid_tokens: Option<Vec<String>>,
     tls: Option<TlsConfig>,
 }
 
@@ -64,6 +66,7 @@ impl Default for SplunkConfig {
         SplunkConfig {
             address: default_socket_address(),
             token: None,
+            valid_tokens: None,
             tls: None,
         }
     }
@@ -88,7 +91,7 @@ impl SourceConfig for SplunkConfig {
             .and(
                 warp::path::full()
                     .map(|path: warp::filters::path::FullPath| {
-                        emit!(SplunkHecRequestReceived {
+                        emit!(&SplunkHecRequestReceived {
                             path: path.as_str()
                         });
                     })
@@ -110,7 +113,8 @@ impl SourceConfig for SplunkConfig {
 
         let shutdown = cx.shutdown;
         Ok(Box::pin(async move {
-            warp::serve(services)
+            let span = crate::trace::current_span();
+            warp::serve(services.with(warp::trace(move |_info| span.clone())))
                 .serve_incoming_with_graceful_shutdown(
                     listener.accept_stream(),
                     shutdown.map(|_| ()),
@@ -136,16 +140,20 @@ impl SourceConfig for SplunkConfig {
 
 /// Shared data for responding to requests.
 struct SplunkSource {
-    credentials: Option<Bytes>,
+    valid_credentials: Vec<String>,
 }
 
 impl SplunkSource {
     fn new(config: &SplunkConfig) -> Self {
+        let valid_tokens = config
+            .valid_tokens
+            .iter()
+            .flatten()
+            .chain(config.token.iter());
         SplunkSource {
-            credentials: config
-                .token
-                .as_ref()
-                .map(|token| format!("Splunk {}", token).into()),
+            valid_credentials: valid_tokens
+                .map(|token| format!("Splunk {}", token))
+                .collect(),
         }
     }
 
@@ -163,6 +171,7 @@ impl SplunkSource {
             .and(self.authorization())
             .and(splunk_channel)
             .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("X-Forwarded-For"))
             .and(self.gzip())
             .and(warp::body::bytes())
             .and_then(
@@ -170,6 +179,7 @@ impl SplunkSource {
                       _,
                       channel: Option<String>,
                       remote: Option<SocketAddr>,
+                      xff: Option<String>,
                       gzip: bool,
                       body: Bytes| {
                     let mut out = out
@@ -182,7 +192,12 @@ impl SplunkSource {
                             Box::new(body.reader())
                         };
 
-                        let events = stream::iter(EventIterator::new(reader, channel, remote));
+                        let events = stream::iter(EventIterator::new(
+                            Deserializer::from_reader(reader).into_iter::<JsonValue>(),
+                            channel,
+                            remote,
+                            xff,
+                        ));
 
                         // `fn send_all` can be used once https://github.com/rust-lang/futures-rs/issues/2402
                         // is resolved.
@@ -216,6 +231,7 @@ impl SplunkSource {
             .and(self.authorization())
             .and(splunk_channel)
             .and(warp::addr::remote())
+            .and(warp::header::optional::<String>("X-Forwarded-For"))
             .and(self.gzip())
             .and(warp::body::bytes())
             .and_then(
@@ -223,12 +239,12 @@ impl SplunkSource {
                       _,
                       channel: String,
                       remote: Option<SocketAddr>,
+                      xff: Option<String>,
                       gzip: bool,
                       body: Bytes| {
                     let out = out.clone();
                     async move {
-                        // Construct event parser
-                        let event = future::ready(raw_event(body, gzip, channel, remote));
+                        let event = future::ready(raw_event(body, gzip, channel, remote, xff));
                         futures::stream::once(event)
                             .forward(
                                 out.sink_map_err(|_| Rejection::from(ApiError::ServerShutdown)),
@@ -243,16 +259,16 @@ impl SplunkSource {
     }
 
     fn health_service(&self) -> BoxedFilter<(Response,)> {
-        let credentials = self.credentials.clone();
+        let valid_credentials = self.valid_credentials.clone();
         let authorize =
             warp::header::optional("Authorization").and_then(move |token: Option<String>| {
-                let credentials = credentials.clone();
+                let valid_credentials = valid_credentials.clone();
                 async move {
-                    match (token, credentials) {
-                        (_, None) => Ok(()),
-                        (Some(token), Some(password)) if token.as_bytes() == password.as_ref() => {
-                            Ok(())
-                        }
+                    if valid_credentials.is_empty() {
+                        return Ok(());
+                    }
+                    match token {
+                        Some(token) if valid_credentials.contains(&token) => Ok(()),
                         _ => Err(Rejection::from(ApiError::BadRequest)),
                     }
                 }
@@ -284,18 +300,16 @@ impl SplunkSource {
 
     /// Authorize request
     fn authorization(&self) -> BoxedFilter<((),)> {
-        let credentials = self.credentials.clone();
+        let valid_credentials = self.valid_credentials.clone();
         warp::header::optional("Authorization")
             .and_then(move |token: Option<String>| {
-                let credentials = credentials.clone();
+                let valid_credentials = valid_credentials.clone();
                 async move {
-                    match (token, credentials) {
-                        (_, None) => Ok(()),
-                        (Some(token), Some(password)) if token.as_bytes() == password.as_ref() => {
-                            Ok(())
-                        }
-                        (Some(_), Some(_)) => Err(Rejection::from(ApiError::InvalidAuthorization)),
-                        (None, Some(_)) => Err(Rejection::from(ApiError::MissingAuthorization)),
+                    match (token, valid_credentials.is_empty()) {
+                        (_, true) => Ok(()),
+                        (Some(token), false) if valid_credentials.contains(&token) => Ok(()),
+                        (Some(_), false) => Err(Rejection::from(ApiError::InvalidAuthorization)),
+                        (None, false) => Err(Rejection::from(ApiError::MissingAuthorization)),
                     }
                 }
             })
@@ -315,12 +329,11 @@ impl SplunkSource {
             .boxed()
     }
 }
-
 /// Constructs one or more events from json-s coming from reader.
 /// If errors, it's done with input.
-struct EventIterator<R: Read> {
+struct EventIterator<'de, R: JsonRead<'de>> {
     /// Remaining request with JSON events
-    data: R,
+    deserializer: serde_json::StreamDeserializer<'de, R, JsonValue>,
     /// Count of sent events
     events: usize,
     /// Optional channel from headers
@@ -331,37 +344,34 @@ struct EventIterator<R: Read> {
     extractors: [DefaultExtractor; 4],
 }
 
-impl<R: Read> EventIterator<R> {
-    fn new(data: R, channel: Option<String>, remote: Option<SocketAddr>) -> Self {
+impl<'de, R: JsonRead<'de>> EventIterator<'de, R> {
+    fn new(
+        deserializer: serde_json::StreamDeserializer<'de, R, JsonValue>,
+        channel: Option<String>,
+        remote: Option<SocketAddr>,
+        remote_addr: Option<String>,
+    ) -> Self {
         EventIterator {
-            data,
+            deserializer,
             events: 0,
             channel: channel.map(Value::from),
             time: Time::Now(Utc::now()),
             extractors: [
+                // Extract the host field with the given priority:
+                // 1. The host field is present in the event payload
+                // 2. The x-forwarded-for header is present in the incoming request
+                // 3. Use the `remote`: SocketAddr value provided by warp
                 DefaultExtractor::new_with(
                     "host",
                     log_schema().host_key(),
-                    remote.map(|addr| addr.to_string()).map(Value::from),
+                    remote_addr
+                        .or_else(|| remote.map(|addr| addr.to_string()))
+                        .map(Value::from),
                 ),
-                DefaultExtractor::new("index", &INDEX),
-                DefaultExtractor::new("source", &SOURCE),
-                DefaultExtractor::new("sourcetype", &SOURCETYPE),
+                DefaultExtractor::new("index", INDEX),
+                DefaultExtractor::new("source", SOURCE),
+                DefaultExtractor::new("sourcetype", SOURCETYPE),
             ],
-        }
-    }
-
-    /// As serde_json::from_reader, but doesn't require that all data has to be consumed,
-    /// nor that it has to exist.
-    fn from_reader_take<T>(&mut self) -> Result<Option<T>, serde_json::Error>
-    where
-        T: de::DeserializeOwned,
-    {
-        use serde_json::de::Read;
-        let mut reader = IoRead::new(&mut self.data);
-        match reader.peek()? {
-            None => Ok(None),
-            Some(_) => Deserialize::deserialize(&mut Deserializer::new(reader)).map(Some),
         }
     }
 
@@ -460,28 +470,28 @@ impl<R: Read> EventIterator<R> {
             de.extract(log, &mut json);
         }
 
-        emit!(SplunkHecEventReceived);
+        emit!(&SplunkHecEventReceived);
         self.events += 1;
 
         Ok(event)
     }
 }
 
-impl<R: Read> Iterator for EventIterator<R> {
+impl<'de, R: JsonRead<'de>> Iterator for EventIterator<'de, R> {
     type Item = Result<Event, Rejection>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.from_reader_take::<JsonValue>() {
-            Ok(Some(json)) => Some(self.build_event(json)),
-            Ok(None) => {
+        match self.deserializer.next() {
+            Some(Ok(json)) => Some(self.build_event(json)),
+            None => {
                 if self.events == 0 {
                     Some(Err(ApiError::NoData.into()))
                 } else {
                     None
                 }
             }
-            Err(error) => {
-                emit!(SplunkHecRequestBodyInvalid {
+            Some(Err(error)) => {
+                emit!(&SplunkHecRequestBodyInvalid {
                     error: error.into()
                 });
                 Some(Err(
@@ -532,7 +542,7 @@ struct DefaultExtractor {
 }
 
 impl DefaultExtractor {
-    fn new(field: &'static str, to_field: &'static str) -> Self {
+    const fn new(field: &'static str, to_field: &'static str) -> Self {
         DefaultExtractor {
             field,
             to_field,
@@ -580,6 +590,7 @@ fn raw_event(
     gzip: bool,
     channel: String,
     remote: Option<SocketAddr>,
+    xff: Option<String>,
 ) -> Result<Event, Rejection> {
     // Process gzip
     let message: Value = if gzip {
@@ -588,7 +599,7 @@ fn raw_event(
             Ok(0) => return Err(ApiError::NoData.into()),
             Ok(_) => Value::from(Bytes::from(data)),
             Err(error) => {
-                emit!(SplunkHecRequestBodyInvalid { error });
+                emit!(&SplunkHecRequestBodyInvalid { error });
                 return Err(ApiError::InvalidDataFormat { event: 0 }.into());
             }
         }
@@ -606,8 +617,12 @@ fn raw_event(
     // Add channel
     log.insert(CHANNEL, channel);
 
-    // Add host
-    if let Some(remote) = remote {
+    // host-field priority for raw endpoint:
+    // - x-forwarded-for is set to `host` field first, if present. If not present:
+    // - set remote addr to host field
+    if let Some(remote_address) = xff {
+        log.insert(log_schema().host_key(), remote_address);
+    } else if let Some(remote) = remote {
         log.insert(log_schema().host_key(), remote.to_string());
     }
 
@@ -619,7 +634,7 @@ fn raw_event(
         .as_mut_log()
         .try_insert(log_schema().source_type_key(), Bytes::from("splunk_hec"));
 
-    emit!(SplunkHecEventReceived);
+    emit!(&SplunkHecEventReceived);
 
     Ok(event)
 }
@@ -674,7 +689,7 @@ fn finish_ok(_: ()) -> Response {
 
 async fn finish_err(rejection: Rejection) -> Result<(Response,), Rejection> {
     if let Some(&error) = rejection.find::<ApiError>() {
-        emit!(SplunkHecRequestError { error });
+        emit!(&SplunkHecRequestError { error });
         Ok((match error {
             ApiError::MissingAuthorization => response_json(
                 StatusCode::UNAUTHORIZED,
@@ -753,7 +768,7 @@ mod tests {
         config::{log_schema, SinkConfig, SinkContext, SourceConfig, SourceContext},
         event::Event,
         sinks::{
-            splunk_hec::{Encoding, HecSinkConfig},
+            splunk_hec::logs::{Encoding, HecSinkLogsConfig},
             util::{encoding::EncodingConfig, BatchConfig, Compression, TowerRequestConfig},
             Healthcheck, VectorSink,
         },
@@ -771,18 +786,25 @@ mod tests {
 
     /// Splunk token
     const TOKEN: &str = "token";
+    const VALID_TOKENS: &[&str; 2] = &[TOKEN, "secondary-token"];
 
     async fn source() -> (mpsc::Receiver<Event>, SocketAddr) {
-        source_with(Some(TOKEN.to_owned())).await
+        source_with(Some(TOKEN.to_owned()), None).await
     }
 
-    async fn source_with(token: Option<String>) -> (mpsc::Receiver<Event>, SocketAddr) {
+    async fn source_with(
+        token: Option<String>,
+        valid_tokens: Option<&[&str]>,
+    ) -> (mpsc::Receiver<Event>, SocketAddr) {
         let (sender, recv) = Pipeline::new_test();
         let address = next_addr();
+        let valid_tokens =
+            valid_tokens.map(|tokens| tokens.iter().map(|&token| String::from(token)).collect());
         tokio::spawn(async move {
             SplunkConfig {
                 address,
                 token,
+                valid_tokens,
                 tls: None,
             }
             .build(SourceContext::new_test(sender))
@@ -800,7 +822,7 @@ mod tests {
         encoding: impl Into<EncodingConfig<Encoding>>,
         compression: Compression,
     ) -> (VectorSink, Healthcheck) {
-        HecSinkConfig {
+        HecSinkLogsConfig {
             token: TOKEN.to_owned(),
             endpoint: format!("http://{}", address),
             host_key: "host".to_owned(),
@@ -854,29 +876,45 @@ mod tests {
         QueryParam(&'a str),
     }
 
-    async fn post(address: SocketAddr, api: &str, message: &str) -> u16 {
-        send_with(address, api, message, TOKEN, Channel::Header("channel")).await
+    #[derive(Default)]
+    struct SendWithOpts<'a> {
+        channel: Option<Channel<'a>>,
+        forwarded_for: Option<String>,
     }
 
-    async fn send_with(
+    async fn post(address: SocketAddr, api: &str, message: &str) -> u16 {
+        let channel = Channel::Header("channel");
+        let options = SendWithOpts {
+            channel: Some(channel),
+            forwarded_for: None,
+        };
+        send_with(address, api, message, TOKEN, &options).await
+    }
+
+    async fn send_with<'a>(
         address: SocketAddr,
         api: &str,
         message: &str,
         token: &str,
-        channel: Channel<'_>,
+        opts: &SendWithOpts<'_>,
     ) -> u16 {
-        let wrap_with_channel =
-            |b: reqwest::RequestBuilder, c: Channel| -> reqwest::RequestBuilder {
-                match c {
-                    Channel::Header(v) => b.header("x-splunk-request-channel", v),
-                    Channel::QueryParam(v) => b.query(&[("channel", v)]),
-                }
-            };
-
         let mut b = reqwest::Client::new()
             .post(&format!("http://{}/{}", address, api))
             .header("Authorization", format!("Splunk {}", token));
-        b = wrap_with_channel(b, channel);
+
+        b = match opts.channel {
+            Some(c) => match c {
+                Channel::Header(v) => b.header("x-splunk-request-channel", v),
+                Channel::QueryParam(v) => b.query(&[("channel", v)]),
+            },
+            None => b,
+        };
+
+        b = match &opts.forwarded_for {
+            Some(f) => b.header("X-Forwarded-For", f),
+            None => b,
+        };
+
         b.body(message.to_owned())
             .send()
             .await
@@ -1041,20 +1079,83 @@ mod tests {
         let message = "raw";
         let (source, address) = source().await;
 
+        let opts = SendWithOpts {
+            channel: Some(Channel::Header("guid")),
+            forwarded_for: None,
+        };
+
         assert_eq!(
             200,
-            send_with(
-                address,
-                "services/collector/raw",
-                message,
-                TOKEN,
-                Channel::Header("guid")
-            )
-            .await
+            send_with(address, "services/collector/raw", message, TOKEN, &opts).await
         );
 
         let event = collect_n(source, 1).await.remove(0);
         assert_eq!(event.as_log()[&super::CHANNEL], "guid".into());
+    }
+
+    #[tokio::test]
+    async fn xff_header_raw() {
+        trace_init();
+
+        let message = "raw";
+        let (source, address) = source().await;
+
+        let opts = SendWithOpts {
+            channel: Some(Channel::Header("guid")),
+            forwarded_for: Some(String::from("10.0.0.1")),
+        };
+
+        assert_eq!(
+            200,
+            send_with(address, "services/collector/raw", message, TOKEN, &opts).await
+        );
+
+        let event = collect_n(source, 1).await.remove(0);
+        assert_eq!(event.as_log()[log_schema().host_key()], "10.0.0.1".into());
+    }
+
+    // Test helps to illustrate that a payload's `host` value should override an x-forwarded-for header
+    #[tokio::test]
+    async fn xff_header_event_with_host_field() {
+        trace_init();
+
+        let message = r#"{"event":"first", "host": "10.1.0.2"}"#;
+        let (source, address) = source().await;
+
+        let opts = SendWithOpts {
+            channel: Some(Channel::Header("guid")),
+            forwarded_for: Some(String::from("10.0.0.1")),
+        };
+
+        assert_eq!(
+            200,
+            send_with(address, "services/collector/event", message, TOKEN, &opts).await
+        );
+
+        let event = collect_n(source, 1).await.remove(0);
+        assert_eq!(event.as_log()[log_schema().host_key()], "10.1.0.2".into());
+    }
+
+    // Test helps to illustrate that a payload's `host` value should override an x-forwarded-for header
+    #[tokio::test]
+    async fn xff_header_event_without_host_field() {
+        trace_init();
+
+        let message = r#"{"event":"first", "color": "blue"}"#;
+        let (source, address) = source().await;
+
+        let opts = SendWithOpts {
+            channel: Some(Channel::Header("guid")),
+            forwarded_for: Some(String::from("10.0.0.1")),
+        };
+
+        assert_eq!(
+            200,
+            send_with(address, "services/collector/event", message, TOKEN, &opts).await
+        );
+
+        let event = collect_n(source, 1).await.remove(0);
+        assert_eq!(event.as_log()[log_schema().host_key()], "10.0.0.1".into());
     }
 
     #[tokio::test]
@@ -1064,16 +1165,14 @@ mod tests {
         let message = "raw";
         let (source, address) = source().await;
 
+        let opts = SendWithOpts {
+            channel: Some(Channel::QueryParam("guid")),
+            forwarded_for: None,
+        };
+
         assert_eq!(
             200,
-            send_with(
-                address,
-                "services/collector/raw",
-                message,
-                TOKEN,
-                Channel::QueryParam("guid")
-            )
-            .await
+            send_with(address, "services/collector/raw", message, TOKEN, &opts).await
         );
 
         let event = collect_n(source, 1).await.remove(0);
@@ -1094,15 +1193,36 @@ mod tests {
         trace_init();
 
         let (_source, address) = source().await;
+        let opts = SendWithOpts {
+            channel: Some(Channel::Header("channel")),
+            forwarded_for: None,
+        };
 
         assert_eq!(
             401,
+            send_with(address, "services/collector/event", "", "nope", &opts).await
+        );
+    }
+
+    #[tokio::test]
+    async fn secondary_token() {
+        trace_init();
+
+        let message = r#"{"event":"first", "color": "blue"}"#;
+        let (_source, address) = source_with(None, Some(VALID_TOKENS)).await;
+        let options = SendWithOpts {
+            channel: None,
+            forwarded_for: None,
+        };
+
+        assert_eq!(
+            200,
             send_with(
                 address,
                 "services/collector/event",
-                "",
-                "nope",
-                Channel::Header("channel")
+                message,
+                VALID_TOKENS.get(1).unwrap(),
+                &options
             )
             .await
         );
@@ -1113,7 +1233,7 @@ mod tests {
         trace_init();
 
         let message = "no_authorization";
-        let (source, address) = source_with(None).await;
+        let (source, address) = source_with(None, None).await;
         let (sink, health) = sink(address, Encoding::Text, Compression::gzip_default()).await;
         assert!(health.await.is_ok());
 
@@ -1131,6 +1251,50 @@ mod tests {
 
         assert_eq!(
             400,
+            post(address, "services/collector/event", message).await
+        );
+
+        let event = collect_n(source, 1).await.remove(0);
+        assert_eq!(event.as_log()[log_schema().message_key()], "first".into());
+        assert!(event.as_log().get(log_schema().timestamp_key()).is_some());
+        assert_eq!(
+            event.as_log()[log_schema().source_type_key()],
+            "splunk_hec".into()
+        );
+    }
+
+    #[tokio::test]
+    async fn handles_newlines() {
+        trace_init();
+
+        let message = r#"
+{"event":"first"}
+        "#;
+        let (source, address) = source().await;
+
+        assert_eq!(
+            200,
+            post(address, "services/collector/event", message).await
+        );
+
+        let event = collect_n(source, 1).await.remove(0);
+        assert_eq!(event.as_log()[log_schema().message_key()], "first".into());
+        assert!(event.as_log().get(log_schema().timestamp_key()).is_some());
+        assert_eq!(
+            event.as_log()[log_schema().source_type_key()],
+            "splunk_hec".into()
+        );
+    }
+
+    #[tokio::test]
+    async fn handles_spaces() {
+        trace_init();
+
+        let message = r#" {"event":"first"} "#;
+        let (source, address) = source().await;
+
+        assert_eq!(
+            200,
             post(address, "services/collector/event", message).await
         );
 

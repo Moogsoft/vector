@@ -10,8 +10,8 @@ compiler = { package = "vrl-compiler", path = "../compiler" }
 diagnostic = { package = "vrl-diagnostic", path = "../diagnostic" }
 parser = { package = "vrl-parser", path = "../parser" }
 lookup = { path = "../../lookup" }
-
-bytes = "1.0.0"
+shared = { path = "../../shared", default-features = false }
+bytes = "1.1.0"
 indoc = "1"
 ordered-float = "2"
 thiserror = "1"
