@@ -446,6 +446,7 @@ sources-metrics = [
   "sources-redis",
   "sources-statsd",
   "sources-vector",
+  "sources-docker_metrics"
 ]
 
 sources-apache_metrics = []
@@ -492,6 +493,7 @@ sources-utils-tls = []
 sources-utils-udp = []
 sources-utils-unix = []
 sources-vector = ["listenfd", "sources-utils-tcp-keepalive", "sources-utils-tcp-socket", "sources-utils-tls", "tonic", "tonic-build", "prost-build", "codecs"]
+sources-docker_metrics = ["docker"]
 
 # Transforms
 transforms = ["transforms-logs", "transforms-metrics"]
@@ -719,6 +721,7 @@ aws-sqs-integration-tests = ["sinks-aws_sqs"]
 azure-blob-integration-tests = ["sinks-azure_blob"]
 clickhouse-integration-tests = ["sinks-clickhouse", "warp"]
 docker-logs-integration-tests = ["sources-docker_logs", "unix"]
+docker-metrics-integration-tests = ["sources-docker_metrics"]
 es-integration-tests = ["sinks-elasticsearch"]
 eventstoredb_metrics-integration-tests = ["sources-eventstoredb_metrics"]
 fluent-integration-tests = ["docker", "sources-fluent", "uuid"]

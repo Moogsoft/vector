@@ -309,6 +309,8 @@ macro_rules! emit {
 }
 
 // Modules that require emit! macro so they need to be defined after the macro.
+#[cfg(feature = "sources-docker_metrics")]
+pub(crate) mod docker_metrics;
 #[cfg(any(
     feature = "sources-file",
     feature = "sources-kubernetes_logs",
