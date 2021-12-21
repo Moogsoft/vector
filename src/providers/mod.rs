@@ -1,4 +1,5 @@
 pub mod http;
+#[cfg(feature = "moogsoft-pipelines")]
 pub mod moogsoft;
 
 use super::config::ConfigBuilder;

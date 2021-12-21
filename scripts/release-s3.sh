@@ -84,14 +84,24 @@ elif [[ "$CHANNEL" == "latest" ]]; then
   VERSION_MAJOR_X="$(echo "$VERSION" | sed 's/\.[0-9]*\.[0-9]*$/.X/g')"
 
   for i in "$VERSION_EXACT" "$VERSION_MINOR_X" "$VERSION_MAJOR_X" "latest"; do
-    # Upload the specific version
-    echo "Uploading artifacts to s3://${S3_BUCKET}/vector/$i/"
-    aws s3 cp "$td" "s3://${S3_BUCKET}/vector/$i/" --recursive --sse --acl private
+    if [[ -z "$ARTIFACT_NAMESPACE" ]]; then
+      # Upload the specific version
+      echo "Uploading artifacts to s3://${S3_BUCKET}/vector/$i/"
+      aws s3 cp "$td" "s3://${S3_BUCKET}/vector/$i/" --recursive --sse --acl private
 
-    # Delete anything that isn't the current version
-    echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/$i/"
-    aws s3 rm "s3://${S3_BUCKET}/vector/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
-    echo "Deleted old versioned artifacts"
+      # Delete anything that isn't the current version
+      echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/$i/"
+      aws s3 rm "s3://${S3_BUCKET}/vector/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
+      echo "Deleted old versioned artifacts"
+    else
+      echo "Uploading artifacts to s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
+      aws s3 cp "$td" "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --sse --acl private
+
+      # Delete anything that isn't the current version
+      echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
+      aws s3 rm "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
+      echo "Deleted old versioned artifacts"
+      fi
   done
 fi
 

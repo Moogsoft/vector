@@ -31,8 +31,6 @@ export AUTODESPAWN ?= ${AUTOSPAWN}
 export AUTOINSTALL ?= false
 # Override to true for a bit more log output in your environment building (more coming!)
 export VERBOSE ?= false
-# Override to set a different Rust toolchain
-export RUST_TOOLCHAIN ?= $(shell cat rust-toolchain)
 # Override the container tool. Tries docker first and then tries podman.
 export CONTAINER_TOOL ?= auto
 ifeq ($(CONTAINER_TOOL),auto)
@@ -290,7 +288,7 @@ target/%/collector.tar.gz: target/%/collector CARGO_HANDLES_FRESHNESS
 
 .PHONY: test
 test: ## Run the unit test suite
-	${MAYBE_ENVIRONMENT_EXEC} cargo test --quiet --workspace --no-fail-fast --no-default-features --features "${DEFAULT_FEATURES} metrics-benches remap-benches statistic-benches ${DNSTAP_BENCHES} benches" ${SCOPE}
+	${MAYBE_ENVIRONMENT_EXEC} cargo test --workspace --no-fail-fast --no-default-features --features "${DEFAULT_FEATURES} metrics-benches remap-benches statistic-benches ${DNSTAP_BENCHES} benches" ${SCOPE}
 
 .PHONY: test-all
 test-all: test test-behavior test-integration ## Runs all tests, unit, behaviorial, and integration.
@@ -327,6 +325,30 @@ ifeq ($(AUTODESPAWN), true)
 	@scripts/setup_integration_env.sh aws stop
 endif
 
+.PHONY: test-integration-aws-sqs
+test-integration-aws-sqs: ## Runs AWS SQS integration tests
+ifeq ($(AUTOSPAWN), true)
+	@scripts/setup_integration_env.sh aws stop
+	@scripts/setup_integration_env.sh aws start
+	sleep 10 # Many services are very slow... Give them a sec...
+endif
+	${MAYBE_ENVIRONMENT_EXEC} cargo test --no-fail-fast --no-default-features --features aws-sqs-integration-tests --lib ::aws_sqs
+ifeq ($(AUTODESPAWN), true)
+	@scripts/setup_integration_env.sh aws stop
+endif
+
+.PHONY: test-integration-aws-cloudwatch-logs
+test-integration-aws-cloudwatch-logs: ## Runs AWS Cloudwatch Logs integration tests
+ifeq ($(AUTOSPAWN), true)
+	@scripts/setup_integration_env.sh aws stop
+	@scripts/setup_integration_env.sh aws start
+	sleep 10 # Many services are very slow... Give them a sec...
+endif
+	${MAYBE_ENVIRONMENT_EXEC} cargo test --no-fail-fast --no-default-features --features aws-cloudwatch-logs-integration-tests --lib ::aws_cloudwatch_logs
+ifeq ($(AUTODESPAWN), true)
+	@scripts/setup_integration_env.sh aws stop
+endif
+
 .PHONY: test-integration-azure
 test-integration-azure: ## Runs Azure integration tests
 ifeq ($(AUTOSPAWN), true)
@@ -351,7 +373,10 @@ ifeq ($(AUTODESPAWN), true)
 	@scripts/setup_integration_env.sh clickhouse stop
 endif
 
-.PHONY: test-integration-docker-logs
+.PHONY: test-integration-datadog-metrics
+test-integration-datadog-metrics: ## Runs Datadog metrics integration tests
+	${MAYBE_ENVIRONMENT_EXEC} cargo test --no-fail-fast --no-default-features --features datadog-metrics-integration-tests --lib ::datadog::metrics::
+
 test-integration-docker-logs: ## Runs Docker Logs integration tests
 	${MAYBE_ENVIRONMENT_EXEC} cargo test --no-fail-fast --no-default-features --features docker-logs-integration-tests --lib ::docker_logs::
 
@@ -828,6 +853,10 @@ release-s3: ## Release artifacts to S3
 .PHONY: release-only-plugins-s3
 release-only-plugins-s3: ## Release plugin artifacts to S3
 	@scripts/release-only-plugins-s3.sh
+
+.PHONY: delete-content-s3
+delete-content-s3:
+	@scripts/delete-content-s3.sh
 
 .PHONY: release-helm
 release-helm: ## Package and release Helm Chart
