@@ -1,1 +1,23 @@
 Tue Dec 21 00:32:40 UTC 2021
+Tue Dec 21 01:14:35 UTC 2021
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   Cargo.lock
+	modified:   Cargo.toml
+	modified:   Makefile
+	modified:   scripts/environment/bootstrap-ubuntu-20.04.sh
+	modified:   scripts/release-s3.sh
+	modified:   src/cli.rs
+	modified:   src/internal_events/mod.rs
+	modified:   src/providers/mod.rs
+	modified:   src/sinks/mod.rs
+	modified:   src/sources/mod.rs
+	modified:   sync-vector-changes-for-MPL-compliance.log
+	modified:   website/cue/reference/components/sources/http.cue
+	modified:   website/cue/reference/urls.cue
+
+no changes added to commit (use "git add" and/or "git commit -a")
