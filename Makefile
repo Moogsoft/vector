@@ -263,10 +263,10 @@ target/%/collector.tar.gz: export PROFILE ?=$(word 2,${PAIR})
 target/%/collector.tar.gz: target/%/collector CARGO_HANDLES_FRESHNESS
 	rm -rf target/scratch/collector-${TRIPLE} || true
 	mkdir -p target/scratch/collector-${TRIPLE}/bin target/scratch/collector-${TRIPLE}/etc
-	cp --recursive --force --verbose \
+	cp -R -f -v \
 		target/${TRIPLE}/${PROFILE}/collector \
 		target/scratch/collector-${TRIPLE}/bin/collector
-	cp --recursive --force --verbose \
+	cp -R -f -v \
 		README.md \
 		MOOGSOFT_README.txt \
 		MOOGSOFT_NOTICE \
@@ -275,7 +275,7 @@ target/%/collector.tar.gz: target/%/collector CARGO_HANDLES_FRESHNESS
 		licenses \
 		config \
 		target/scratch/collector-${TRIPLE}/
-	cp --recursive --force --verbose \
+	cp -R -f -v \
 		distribution/systemd \
 		target/scratch/collector-${TRIPLE}/etc/
 	tar --create \
@@ -673,6 +673,7 @@ signoff: ## Signsoff all previous commits since branch creation
 slim-builds: ## Updates the Cargo config to product disk optimized builds (for CI, not for users)
 	${MAYBE_ENVIRONMENT_EXEC} ./scripts/slim-builds.sh
 
+## sudo spkg was added by Moogsoft to fix an issue, we might want to look at removing this
 ifeq (${CI}, true)
 .PHONY: ci-sweep
 ci-sweep: ## Sweep up the CI to try to get more disk space.
