@@ -29,4 +29,4 @@ heat dir collector-"${ARCHIVE_VERSION}"-x86_64-pc-windows-msvc \
 sed -i'' 's/Component /Component Win64="yes" /g' components.wxs
 candle components.wxs -dVectorDir=collector-"${ARCHIVE_VERSION}"-x86_64-pc-windows-msvc
 candle vector.wxs -ext WiXUtilExtension
-light vector.wixobj components.wixobj -out vector.msi -ext WixUIExtension -ext WiXUtilExtension
+light vector.wixobj components.wixobj -out collector.msi -ext WixUIExtension -ext WiXUtilExtension
