@@ -1,6 +1,8 @@
-use crate::config;
 use std::path::PathBuf;
+
 use structopt::StructOpt;
+
+use crate::config;
 
 #[derive(StructOpt, Debug)]
 #[structopt(rename_all = "kebab-case")]
@@ -72,6 +74,7 @@ pub fn cmd(opts: &Opts) -> exitcode::ExitCode {
     let config = match config::load_from_paths(&paths) {
         Ok(config) => config,
         Err(errs) => {
+            #[allow(clippy::print_stderr)]
             for err in errs {
                 eprintln!("{}", err);
             }
@@ -89,7 +92,14 @@ pub fn cmd(opts: &Opts) -> exitcode::ExitCode {
         dot += &format!("  \"{}\" [shape=diamond]\n", id);
 
         for input in transform.inputs.iter() {
-            dot += &format!("  \"{}\" -> \"{}\"\n", input, id);
+            if let Some(port) = &input.port {
+                dot += &format!(
+                    "  \"{}\" -> \"{}\" [label=\"{}\"]\n",
+                    input.component, id, port
+                );
+            } else {
+                dot += &format!("  \"{}\" -> \"{}\"\n", input, id);
+            }
         }
     }
 
@@ -97,13 +107,23 @@ pub fn cmd(opts: &Opts) -> exitcode::ExitCode {
         dot += &format!("  \"{}\" [shape=invtrapezium]\n", id);
 
         for input in &sink.inputs {
-            dot += &format!("  \"{}\" -> \"{}\"\n", input, id);
+            if let Some(port) = &input.port {
+                dot += &format!(
+                    "  \"{}\" -> \"{}\" [label=\"{}\"]\n",
+                    input.component, id, port
+                );
+            } else {
+                dot += &format!("  \"{}\" -> \"{}\"\n", input, id);
+            }
         }
     }
 
     dot += "}";
 
-    println!("{}", dot);
+    #[allow(clippy::print_stdout)]
+    {
+        println!("{}", dot);
+    }
 
     exitcode::OK
 }

@@ -170,3 +170,712 @@ Changes not staged for commit:
 	modified:   sync-vector-changes-for-MPL-compliance.log
 
 no changes added to commit (use "git add" and/or "git commit -a")
+Mon Feb 28 18:22:36 UTC 2022
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   README.md
+	modified:   RELEASES.md
+	modified:   VERSIONING.md
+	modified:   benches/batch.rs
+	new file:   benches/codecs/character_delimited_bytes.rs
+	new file:   benches/codecs/newline_bytes.rs
+	modified:   benches/dnstap/mod.rs
+	modified:   benches/event.rs
+	modified:   benches/files.rs
+	modified:   benches/languages.rs
+	modified:   benches/lua.rs
+	modified:   benches/regex.rs
+	modified:   benches/remap.rs
+	modified:   benches/template.rs
+	modified:   benches/transform/common.rs
+	modified:   benches/transform/dedupe.rs
+	modified:   benches/transform/filter.rs
+	modified:   benches/transform/reduce.rs
+	modified:   deny.toml
+	modified:   distribution/install.sh
+	new file:   distribution/kubernetes/vector-agent/README.md
+	new file:   distribution/kubernetes/vector-agent/configmap.yaml
+	new file:   distribution/kubernetes/vector-agent/daemonset.yaml
+	new file:   distribution/kubernetes/vector-agent/rbac.yaml
+	new file:   distribution/kubernetes/vector-agent/serviceaccount.yaml
+	new file:   distribution/kubernetes/vector-aggregator/README.md
+	new file:   distribution/kubernetes/vector-aggregator/configmap.yaml
+	new file:   distribution/kubernetes/vector-aggregator/service-headless.yaml
+	new file:   distribution/kubernetes/vector-aggregator/service.yaml
+	new file:   distribution/kubernetes/vector-aggregator/serviceaccount.yaml
+	new file:   distribution/kubernetes/vector-aggregator/statefulset.yaml
+	new file:   distribution/kubernetes/vector-stateless-aggregator/README.md
+	new file:   distribution/kubernetes/vector-stateless-aggregator/configmap.yaml
+	new file:   distribution/kubernetes/vector-stateless-aggregator/deployment.yaml
+	new file:   distribution/kubernetes/vector-stateless-aggregator/service-headless.yaml
+	new file:   distribution/kubernetes/vector-stateless-aggregator/service.yaml
+	new file:   distribution/kubernetes/vector-stateless-aggregator/serviceaccount.yaml
+	modified:   docs/CONTRIBUTING.md
+	modified:   docs/DEVELOPING.md
+	modified:   docs/specs/component.md
+	new file:   lib/datadog/filter/Cargo.toml
+	modified:   lib/datadog/grok/Cargo.toml
+	new file:   lib/datadog/grok/src/filters/keyvalue.rs
+	new file:   lib/datadog/grok/src/grok_filter.rs
+	new file:   lib/datadog/grok/src/parse_grok.rs
+	modified:   lib/datadog/search-syntax/Cargo.toml
+	modified:   lib/datadog/search-syntax/src/node.rs
+	modified:   lib/dnsmsg-parser/Cargo.toml
+	modified:   lib/enrichment/Cargo.toml
+	modified:   lib/enrichment/src/find_enrichment_table_records.rs
+	modified:   lib/enrichment/src/get_enrichment_table_record.rs
+	modified:   lib/enrichment/src/lib.rs
+	modified:   lib/enrichment/src/tables.rs
+	modified:   lib/enrichment/src/test_util.rs
+	modified:   lib/fakedata/Cargo.toml
+	modified:   lib/file-source/Cargo.toml
+	modified:   lib/file-source/src/file_server.rs
+	modified:   lib/file-source/src/fingerprinter.rs
+	modified:   lib/file-source/src/metadata_ext.rs
+	modified:   lib/k8s-e2e-tests/Cargo.toml
+	modified:   lib/k8s-test-framework/Cargo.toml
+	modified:   lib/lookup/Cargo.toml
+	modified:   lib/lookup/src/lookup_buf/test.rs
+	modified:   lib/lookup/src/lookup_view/test.rs
+	modified:   lib/portpicker/Cargo.toml
+	modified:   lib/portpicker/src/lib.rs
+	modified:   lib/prometheus-parser/Cargo.toml
+	new file:   lib/soak/Cargo.toml
+	modified:   lib/tracing-limit/Cargo.toml
+	modified:   lib/vector-api-client/Cargo.toml
+	modified:   lib/vector-api-client/graphql/schema.json
+	modified:   lib/vector-api-client/src/gql/metrics.rs
+	modified:   lib/vector-api-client/src/gql/tap.rs
+	new file:   lib/vector-buffers/Cargo.toml
+	new file:   lib/vector-buffers/benches/sized_records.rs
+	new file:   lib/vector-buffers/examples/buffer_perf.rs
+	new file:   lib/vector-buffers/src/config.rs
+	new file:   lib/vector-buffers/src/encoding.rs
+	new file:   lib/vector-buffers/src/lib.rs
+	new file:   lib/vector-buffers/src/test/common/mod.rs
+	new file:   lib/vector-buffers/src/test/common/variant.rs
+	new file:   lib/vector-buffers/src/test/mod.rs
+	new file:   lib/vector-buffers/src/test/model/mod.rs
+	new file:   lib/vector-buffers/src/topology/builder.rs
+	new file:   lib/vector-buffers/src/topology/channel/mod.rs
+	new file:   lib/vector-buffers/src/topology/channel/receiver.rs
+	new file:   lib/vector-buffers/src/topology/channel/sender.rs
+	new file:   lib/vector-buffers/src/topology/mod.rs
+	new file:   lib/vector-buffers/src/topology/test_util.rs
+	new file:   lib/vector-common/Cargo.toml
+	new file:   lib/vector-common/src/byte_size_of.rs
+	new file:   lib/vector-common/src/conversion.rs
+	new file:   lib/vector-common/src/conversion/tests/mod.rs
+	new file:   lib/vector-common/src/conversion/tests/unix.rs
+	new file:   lib/vector-common/src/encode_key_value.rs
+	new file:   lib/vector-common/src/encode_logfmt.rs
+	new file:   lib/vector-common/src/lib.rs
+	modified:   lib/vector-core/Cargo.toml
+	modified:   lib/vector-core/proto/event.proto
+	modified:   lib/vector-core/src/config/log_schema.rs
+	modified:   lib/vector-core/src/config/mod.rs
+	new file:   lib/vector-core/src/event/array.rs
+	modified:   lib/vector-core/src/event/discriminant.rs
+	modified:   lib/vector-core/src/event/log_event.rs
+	modified:   lib/vector-core/src/event/lua/event.rs
+	modified:   lib/vector-core/src/event/metadata.rs
+	modified:   lib/vector-core/src/event/metric.rs
+	modified:   lib/vector-core/src/event/mod.rs
+	modified:   lib/vector-core/src/event/proto.rs
+	modified:   lib/vector-core/src/event/test/common.rs
+	modified:   lib/vector-core/src/event/test/serialization.rs
+	modified:   lib/vector-core/src/event/util/log/all_fields.rs
+	modified:   lib/vector-core/src/event/util/log/contains.rs
+	modified:   lib/vector-core/src/event/util/log/get.rs
+	modified:   lib/vector-core/src/event/util/log/get_mut.rs
+	modified:   lib/vector-core/src/event/util/log/insert.rs
+	modified:   lib/vector-core/src/event/util/log/mod.rs
+	modified:   lib/vector-core/src/event/util/log/path_iter.rs
+	modified:   lib/vector-core/src/event/util/log/remove.rs
+	modified:   lib/vector-core/src/event/vrl_target.rs
+	new file:   lib/vector-core/src/fanout.rs
+	modified:   lib/vector-core/src/lib.rs
+	modified:   lib/vector-core/src/metrics/handle.rs
+	modified:   lib/vector-core/src/test_util.rs
+	modified:   lib/vector-core/src/transform/config.rs
+	modified:   lib/vector-core/src/transform/mod.rs
+	new file:   lib/vector-vrl-functions/Cargo.toml
+	new file:   lib/vector-vrl-functions/src/get_metadata_field.rs
+	new file:   lib/vector-vrl-functions/src/lib.rs
+	new file:   lib/vector-vrl-functions/src/remove_metadata_field.rs
+	new file:   lib/vector-vrl-functions/src/set_metadata_field.rs
+	modified:   lib/vrl/cli/Cargo.toml
+	modified:   lib/vrl/cli/src/cmd.rs
+	modified:   lib/vrl/cli/src/repl.rs
+	modified:   lib/vrl/compiler/Cargo.toml
+	modified:   lib/vrl/compiler/benches/kind.rs
+	modified:   lib/vrl/compiler/src/expression.rs
+	modified:   lib/vrl/compiler/src/expression/abort.rs
+	modified:   lib/vrl/compiler/src/expression/array.rs
+	modified:   lib/vrl/compiler/src/expression/assignment.rs
+	modified:   lib/vrl/compiler/src/expression/block.rs
+	modified:   lib/vrl/compiler/src/expression/function_call.rs
+	modified:   lib/vrl/compiler/src/expression/if_statement.rs
+	modified:   lib/vrl/compiler/src/expression/literal.rs
+	modified:   lib/vrl/compiler/src/expression/noop.rs
+	modified:   lib/vrl/compiler/src/expression/not.rs
+	modified:   lib/vrl/compiler/src/expression/object.rs
+	modified:   lib/vrl/compiler/src/expression/op.rs
+	modified:   lib/vrl/compiler/src/expression/predicate.rs
+	modified:   lib/vrl/compiler/src/expression/query.rs
+	modified:   lib/vrl/compiler/src/expression/variable.rs
+	modified:   lib/vrl/compiler/src/function.rs
+	modified:   lib/vrl/compiler/src/lib.rs
+	modified:   lib/vrl/compiler/src/state.rs
+	modified:   lib/vrl/compiler/src/test_util.rs
+	modified:   lib/vrl/compiler/src/type_def.rs
+	modified:   lib/vrl/compiler/src/value.rs
+	modified:   lib/vrl/compiler/src/value/arithmetic.rs
+	modified:   lib/vrl/compiler/src/value/convert.rs
+	modified:   lib/vrl/compiler/src/value/kind.rs
+	new file:   lib/vrl/compiler/src/vm/argument_list.rs
+	new file:   lib/vrl/compiler/src/vm/machine.rs
+	modified:   lib/vrl/core/Cargo.toml
+	modified:   lib/vrl/core/src/lib.rs
+	modified:   lib/vrl/diagnostic/Cargo.toml
+	modified:   lib/vrl/parser/Cargo.toml
+	modified:   lib/vrl/stdlib/Cargo.toml
+	modified:   lib/vrl/stdlib/benches/benches.rs
+	modified:   lib/vrl/stdlib/src/array.rs
+	modified:   lib/vrl/stdlib/src/assert.rs
+	modified:   lib/vrl/stdlib/src/assert_eq.rs
+	modified:   lib/vrl/stdlib/src/boolean.rs
+	modified:   lib/vrl/stdlib/src/ceil.rs
+	modified:   lib/vrl/stdlib/src/compact.rs
+	modified:   lib/vrl/stdlib/src/contains.rs
+	modified:   lib/vrl/stdlib/src/decode_base64.rs
+	modified:   lib/vrl/stdlib/src/decode_percent.rs
+	modified:   lib/vrl/stdlib/src/del.rs
+	modified:   lib/vrl/stdlib/src/downcase.rs
+	modified:   lib/vrl/stdlib/src/encode_base64.rs
+	modified:   lib/vrl/stdlib/src/encode_json.rs
+	modified:   lib/vrl/stdlib/src/encode_key_value.rs
+	modified:   lib/vrl/stdlib/src/encode_percent.rs
+	modified:   lib/vrl/stdlib/src/exists.rs
+	modified:   lib/vrl/stdlib/src/find.rs
+	modified:   lib/vrl/stdlib/src/flatten.rs
+	modified:   lib/vrl/stdlib/src/float.rs
+	modified:   lib/vrl/stdlib/src/floor.rs
+	modified:   lib/vrl/stdlib/src/format_int.rs
+	modified:   lib/vrl/stdlib/src/format_timestamp.rs
+	modified:   lib/vrl/stdlib/src/integer.rs
+	modified:   lib/vrl/stdlib/src/ip_subnet.rs
+	modified:   lib/vrl/stdlib/src/is_array.rs
+	modified:   lib/vrl/stdlib/src/is_boolean.rs
+	modified:   lib/vrl/stdlib/src/is_float.rs
+	modified:   lib/vrl/stdlib/src/is_integer.rs
+	modified:   lib/vrl/stdlib/src/is_null.rs
+	modified:   lib/vrl/stdlib/src/is_object.rs
+	modified:   lib/vrl/stdlib/src/is_regex.rs
+	modified:   lib/vrl/stdlib/src/is_string.rs
+	modified:   lib/vrl/stdlib/src/is_timestamp.rs
+	modified:   lib/vrl/stdlib/src/join.rs
+	modified:   lib/vrl/stdlib/src/lib.rs
+	modified:   lib/vrl/stdlib/src/log.rs
+	modified:   lib/vrl/stdlib/src/log_util.rs
+	modified:   lib/vrl/stdlib/src/match.rs
+	modified:   lib/vrl/stdlib/src/match_any.rs
+	modified:   lib/vrl/stdlib/src/match_array.rs
+	modified:   lib/vrl/stdlib/src/match_datadog_query.rs
+	modified:   lib/vrl/stdlib/src/merge.rs
+	modified:   lib/vrl/stdlib/src/now.rs
+	modified:   lib/vrl/stdlib/src/object.rs
+	modified:   lib/vrl/stdlib/src/parse_apache_log.rs
+	modified:   lib/vrl/stdlib/src/parse_aws_alb_log.rs
+	modified:   lib/vrl/stdlib/src/parse_aws_cloudwatch_log_subscription_message.rs
+	modified:   lib/vrl/stdlib/src/parse_aws_vpc_flow_log.rs
+	modified:   lib/vrl/stdlib/src/parse_common_log.rs
+	modified:   lib/vrl/stdlib/src/parse_duration.rs
+	modified:   lib/vrl/stdlib/src/parse_glog.rs
+	modified:   lib/vrl/stdlib/src/parse_grok.rs
+	new file:   lib/vrl/stdlib/src/parse_groks.rs
+	modified:   lib/vrl/stdlib/src/parse_int.rs
+	modified:   lib/vrl/stdlib/src/parse_json.rs
+	modified:   lib/vrl/stdlib/src/parse_key_value.rs
+	modified:   lib/vrl/stdlib/src/parse_klog.rs
+	modified:   lib/vrl/stdlib/src/parse_nginx_log.rs
+	modified:   lib/vrl/stdlib/src/parse_query_string.rs
+	modified:   lib/vrl/stdlib/src/parse_regex.rs
+	modified:   lib/vrl/stdlib/src/parse_regex_all.rs
+	modified:   lib/vrl/stdlib/src/parse_ruby_hash.rs
+	modified:   lib/vrl/stdlib/src/parse_syslog.rs
+	modified:   lib/vrl/stdlib/src/parse_timestamp.rs
+	modified:   lib/vrl/stdlib/src/parse_tokens.rs
+	modified:   lib/vrl/stdlib/src/parse_url.rs
+	modified:   lib/vrl/stdlib/src/parse_user_agent.rs
+	modified:   lib/vrl/stdlib/src/parse_xml.rs
+	modified:   lib/vrl/stdlib/src/push.rs
+	modified:   lib/vrl/stdlib/src/redact.rs
+	modified:   lib/vrl/stdlib/src/remove.rs
+	modified:   lib/vrl/stdlib/src/replace.rs
+	modified:   lib/vrl/stdlib/src/reverse_dns.rs
+	modified:   lib/vrl/stdlib/src/round.rs
+	modified:   lib/vrl/stdlib/src/set.rs
+	modified:   lib/vrl/stdlib/src/slice.rs
+	modified:   lib/vrl/stdlib/src/starts_with.rs
+	modified:   lib/vrl/stdlib/src/string.rs
+	modified:   lib/vrl/stdlib/src/strip_whitespace.rs
+	modified:   lib/vrl/stdlib/src/tag_types_externally.rs
+	modified:   lib/vrl/stdlib/src/tally.rs
+	new file:   lib/vrl/stdlib/src/tally_value.rs
+	modified:   lib/vrl/stdlib/src/to_bool.rs
+	modified:   lib/vrl/stdlib/src/to_float.rs
+	modified:   lib/vrl/stdlib/src/to_int.rs
+	modified:   lib/vrl/stdlib/src/to_regex.rs
+	modified:   lib/vrl/stdlib/src/to_string.rs
+	modified:   lib/vrl/stdlib/src/to_timestamp.rs
+	modified:   lib/vrl/stdlib/src/to_unix_timestamp.rs
+	modified:   lib/vrl/stdlib/src/unique.rs
+	modified:   lib/vrl/stdlib/src/unnest.rs
+	modified:   lib/vrl/stdlib/src/upcase.rs
+	modified:   lib/vrl/stdlib/src/uuid_v4.rs
+	modified:   lib/vrl/tests/Cargo.toml
+	modified:   lib/vrl/tests/src/main.rs
+	new file:   lib/vrl/tests/tests/diagnostics/abort_with_non_string_message.vrl
+	modified:   rfcs/2020-04-04-2221-kubernetes-integration.md
+	modified:   rfcs/2020-09-29-4155-aws-s3-source.md
+	modified:   rfcs/2020-10-06-3791-composing-components-pt-1.md
+	modified:   rfcs/2020-10-15-3480-file-source-rework.md
+	modified:   rfcs/2020-11-01-remap-metrics-support.md
+	modified:   rfcs/2021-01-08-5843-encdoing-decoding-format-vector.md
+	modified:   rfcs/2021-04-07-6330-emitting-multiple-log-events-from-remap-transform.md
+	modified:   rfcs/2021-07-23-8447-extract-helm-charts.md
+	modified:   rfcs/2021-09-01-8547-accept-metrics-in-datadog-agent-source.md
+	new file:   rfcs/2021-10-29-8621-framing-and-codecs-sinks.md
+	modified:   rfcs/README.md
+	modified:   scripts/environment/Dockerfile
+	new file:   scripts/integration/docker-compose.aws.yml
+	new file:   soaks/README.md
+	new file:   soaks/bin/analyze_experiment
+	new file:   soaks/bin/detect_regressions
+	new file:   soaks/bin/run_experiment.sh
+	new file:   soaks/bin/soak_one.sh
+	new file:   soaks/soak.sh
+	new file:   soaks/tests/http_datadog_filter_blackhole/README.md
+	new file:   soaks/tests/http_datadog_filter_blackhole/terraform/vector.toml
+	modified:   src/api/handler.rs
+	modified:   src/api/mod.rs
+	modified:   src/api/schema/components/mod.rs
+	modified:   src/api/schema/components/source.rs
+	modified:   src/api/schema/components/state.rs
+	modified:   src/api/schema/events/log.rs
+	modified:   src/api/schema/events/mod.rs
+	modified:   src/api/schema/events/output.rs
+	modified:   src/api/schema/filter.rs
+	modified:   src/api/schema/health.rs
+	modified:   src/api/schema/metrics/events_in.rs
+	modified:   src/api/schema/metrics/events_out.rs
+	modified:   src/api/schema/metrics/mod.rs
+	modified:   src/api/schema/mod.rs
+	modified:   src/api/server.rs
+	modified:   src/api/tap.rs
+	modified:   src/app.rs
+	new file:   src/aws/aws_sdk/auth.rs
+	new file:   src/aws/rusoto/mod.rs
+	new file:   src/codecs/decoding/format/bytes.rs
+	new file:   src/codecs/decoding/format/json.rs
+	new file:   src/codecs/decoding/format/mod.rs
+	new file:   src/codecs/decoding/format/syslog.rs
+	new file:   src/codecs/decoding/framing/character_delimited.rs
+	new file:   src/codecs/decoding/mod.rs
+	new file:   src/codecs/encoding/format/json.rs
+	new file:   src/codecs/encoding/format/raw_message.rs
+	modified:   src/conditions/check_fields.rs
+	modified:   src/conditions/datadog_search.rs
+	modified:   src/conditions/is_log.rs
+	modified:   src/conditions/is_metric.rs
+	modified:   src/conditions/mod.rs
+	new file:   src/conditions/not.rs
+	modified:   src/conditions/vrl.rs
+	modified:   src/config/builder.rs
+	modified:   src/config/compiler.rs
+	new file:   src/config/graph.rs
+	modified:   src/config/loading.rs
+	modified:   src/config/mod.rs
+	new file:   src/config/recursive.rs
+	new file:   src/config/unit_test/mod.rs
+	new file:   src/config/unit_test/tests.rs
+	new file:   src/config/unit_test/unit_test_components.rs
+	modified:   src/config/validation.rs
+	modified:   src/config/watcher.rs
+	modified:   src/dns.rs
+	modified:   src/expiring_hash_map.rs
+	modified:   src/generate.rs
+	modified:   src/graph.rs
+	modified:   src/http.rs
+	modified:   src/internal_events/apache_metrics.rs
+	modified:   src/internal_events/aws_ecs_metrics.rs
+	modified:   src/internal_events/aws_kinesis_firehose.rs
+	modified:   src/internal_events/common.rs
+	new file:   src/internal_events/datadog_metrics.rs
+	modified:   src/internal_events/dnstap.rs
+	modified:   src/internal_events/docker_logs.rs
+	modified:   src/internal_events/eventstoredb_metrics.rs
+	modified:   src/internal_events/exec.rs
+	modified:   src/internal_events/file.rs
+	modified:   src/internal_events/http.rs
+	modified:   src/internal_events/journald.rs
+	modified:   src/internal_events/kafka.rs
+	modified:   src/internal_events/kubernetes_logs.rs
+	modified:   src/internal_events/log_to_metric.rs
+	modified:   src/internal_events/mongodb_metrics.rs
+	modified:   src/internal_events/nats.rs
+	modified:   src/internal_events/nginx_metrics.rs
+	modified:   src/internal_events/open.rs
+	modified:   src/internal_events/postgresql_metrics.rs
+	modified:   src/internal_events/prometheus.rs
+	modified:   src/internal_events/socket.rs
+	modified:   src/internal_events/splunk_hec.rs
+	modified:   src/internal_events/syslog.rs
+	modified:   src/internal_events/tcp.rs
+	modified:   src/internal_events/template.rs
+	new file:   src/internal_events/throttle.rs
+	modified:   src/internal_events/unix.rs
+	modified:   src/internal_events/vector.rs
+	modified:   src/kafka.rs
+	modified:   src/kubernetes/reflector.rs
+	modified:   src/lib.rs
+	modified:   src/line_agg.rs
+	modified:   src/list.rs
+	modified:   src/providers/http.rs
+	modified:   src/serde.rs
+	modified:   src/service.rs
+	modified:   src/signal.rs
+	modified:   src/sink.rs
+	new file:   src/sinks/aws_cloudwatch_logs/config.rs
+	new file:   src/sinks/aws_cloudwatch_logs/integration_tests.rs
+	modified:   src/sinks/aws_cloudwatch_logs/mod.rs
+	new file:   src/sinks/aws_cloudwatch_logs/request_builder.rs
+	new file:   src/sinks/aws_cloudwatch_logs/sink.rs
+	modified:   src/sinks/aws_cloudwatch_metrics.rs
+	new file:   src/sinks/aws_kinesis_firehose/config.rs
+	new file:   src/sinks/aws_kinesis_firehose/integration_tests.rs
+	new file:   src/sinks/aws_kinesis_firehose/request_builder.rs
+	new file:   src/sinks/aws_kinesis_firehose/tests.rs
+	new file:   src/sinks/aws_kinesis_streams/config.rs
+	new file:   src/sinks/aws_kinesis_streams/integration_tests.rs
+	modified:   src/sinks/aws_s3/config.rs
+	modified:   src/sinks/aws_s3/tests.rs
+	modified:   src/sinks/aws_sqs.rs
+	modified:   src/sinks/azure_blob.rs
+	new file:   src/sinks/azure_common/service.rs
+	modified:   src/sinks/azure_monitor_logs.rs
+	new file:   src/sinks/blackhole/config.rs
+	modified:   src/sinks/clickhouse.rs
+	new file:   src/sinks/console/config.rs
+	new file:   src/sinks/datadog/events/config.rs
+	new file:   src/sinks/datadog/events/request_builder.rs
+	new file:   src/sinks/datadog/events/service.rs
+	new file:   src/sinks/datadog/events/sink.rs
+	modified:   src/sinks/datadog/logs/config.rs
+	modified:   src/sinks/datadog/logs/service.rs
+	modified:   src/sinks/datadog/logs/sink.rs
+	new file:   src/sinks/datadog/metrics/config.rs
+	new file:   src/sinks/datadog/metrics/encoder.rs
+	new file:   src/sinks/datadog/metrics/normalizer.rs
+	new file:   src/sinks/datadog/metrics/request_builder.rs
+	new file:   src/sinks/datadog/metrics/sink.rs
+	modified:   src/sinks/datadog_archives.rs
+	new file:   src/sinks/elasticsearch/common.rs
+	new file:   src/sinks/elasticsearch/config.rs
+	new file:   src/sinks/elasticsearch/encoder.rs
+	new file:   src/sinks/elasticsearch/integration_tests.rs
+	modified:   src/sinks/elasticsearch/mod.rs
+	new file:   src/sinks/elasticsearch/request_builder.rs
+	modified:   src/sinks/elasticsearch/retry.rs
+	new file:   src/sinks/elasticsearch/service.rs
+	new file:   src/sinks/elasticsearch/sink.rs
+	new file:   src/sinks/elasticsearch/tests.rs
+	modified:   src/sinks/file/mod.rs
+	modified:   src/sinks/gcp/cloud_storage.rs
+	modified:   src/sinks/gcp/pubsub.rs
+	modified:   src/sinks/gcp/stackdriver_logs.rs
+	modified:   src/sinks/gcp/stackdriver_metrics.rs
+	modified:   src/sinks/honeycomb.rs
+	modified:   src/sinks/http.rs
+	modified:   src/sinks/humio/logs.rs
+	modified:   src/sinks/humio/metrics.rs
+	modified:   src/sinks/humio/mod.rs
+	modified:   src/sinks/influxdb/logs.rs
+	modified:   src/sinks/influxdb/metrics.rs
+	modified:   src/sinks/influxdb/mod.rs
+	new file:   src/sinks/kafka/config.rs
+	new file:   src/sinks/kafka/request_builder.rs
+	new file:   src/sinks/kafka/service.rs
+	new file:   src/sinks/kafka/sink.rs
+	modified:   src/sinks/logdna.rs
+	new file:   src/sinks/loki/config.rs
+	new file:   src/sinks/loki/healthcheck.rs
+	new file:   src/sinks/loki/integration_tests.rs
+	new file:   src/sinks/loki/service.rs
+	new file:   src/sinks/loki/sink.rs
+	modified:   src/sinks/nats.rs
+	new file:   src/sinks/new_relic/config.rs
+	new file:   src/sinks/new_relic/healthcheck.rs
+	new file:   src/sinks/new_relic/mod.rs
+	new file:   src/sinks/new_relic/model.rs
+	new file:   src/sinks/new_relic/service.rs
+	new file:   src/sinks/new_relic/sink.rs
+	new file:   src/sinks/new_relic/tests.rs
+	modified:   src/sinks/new_relic_logs.rs
+	modified:   src/sinks/papertrail.rs
+	modified:   src/sinks/prometheus/collector.rs
+	modified:   src/sinks/prometheus/exporter.rs
+	modified:   src/sinks/prometheus/remote_write.rs
+	modified:   src/sinks/pulsar.rs
+	modified:   src/sinks/redis.rs
+	modified:   src/sinks/s3_common/config.rs
+	modified:   src/sinks/s3_common/service.rs
+	modified:   src/sinks/sematext/logs.rs
+	modified:   src/sinks/sematext/metrics.rs
+	modified:   src/sinks/socket.rs
+	new file:   src/sinks/splunk_hec/common/acknowledgements.rs
+	new file:   src/sinks/splunk_hec/common/request.rs
+	new file:   src/sinks/splunk_hec/common/service.rs
+	new file:   src/sinks/splunk_hec/common/util.rs
+	new file:   src/sinks/splunk_hec/logs/config.rs
+	new file:   src/sinks/splunk_hec/logs/request_builder.rs
+	new file:   src/sinks/splunk_hec/metrics/config.rs
+	new file:   src/sinks/splunk_hec/metrics/request_builder.rs
+	modified:   src/sinks/statsd.rs
+	modified:   src/sinks/util/adaptive_concurrency/tests.rs
+	modified:   src/sinks/util/buffer/mod.rs
+	modified:   src/sinks/util/compressor.rs
+	modified:   src/sinks/util/encoding/codec.rs
+	modified:   src/sinks/util/encoding/config.rs
+	modified:   src/sinks/util/encoding/mod.rs
+	modified:   src/sinks/util/http.rs
+	modified:   src/sinks/util/mod.rs
+	new file:   src/sinks/util/partitioner.rs
+	modified:   src/sinks/util/request_builder.rs
+	modified:   src/sinks/util/udp.rs
+	modified:   src/sinks/util/uri.rs
+	modified:   src/sinks/vector/mod.rs
+	new file:   src/source_sender/mod.rs
+	modified:   src/sources/apache_metrics/mod.rs
+	modified:   src/sources/apache_metrics/parser.rs
+	modified:   src/sources/aws_ecs_metrics/mod.rs
+	modified:   src/sources/aws_ecs_metrics/parser.rs
+	modified:   src/sources/aws_kinesis_firehose/mod.rs
+	modified:   src/sources/aws_s3/mod.rs
+	modified:   src/sources/aws_s3/sqs.rs
+	new file:   src/sources/aws_sqs/config.rs
+	new file:   src/sources/aws_sqs/events.rs
+	new file:   src/sources/aws_sqs/integration_tests.rs
+	new file:   src/sources/aws_sqs/source.rs
+	new file:   src/sources/datadog/agent/integration_tests.rs
+	new file:   src/sources/datadog/agent/mod.rs
+	new file:   src/sources/datadog/agent/tests.rs
+	new file:   src/sources/datadog/sketch_parser.rs
+	new file:   src/sources/demo_logs.rs
+	modified:   src/sources/dnstap/mod.rs
+	modified:   src/sources/dnstap/parser.rs
+	modified:   src/sources/docker_logs.rs
+	modified:   src/sources/eventstoredb_metrics/mod.rs
+	modified:   src/sources/exec/mod.rs
+	modified:   src/sources/file.rs
+	modified:   src/sources/fluent/message.rs
+	new file:   src/sources/fluent/mod.rs
+	modified:   src/sources/heroku_logs.rs
+	modified:   src/sources/host_metrics/mod.rs
+	modified:   src/sources/http.rs
+	modified:   src/sources/internal_logs.rs
+	modified:   src/sources/internal_metrics.rs
+	modified:   src/sources/journald.rs
+	modified:   src/sources/kafka.rs
+	modified:   src/sources/kubernetes_logs/k8s_paths_provider.rs
+	modified:   src/sources/kubernetes_logs/mod.rs
+	modified:   src/sources/kubernetes_logs/parser/cri.rs
+	modified:   src/sources/kubernetes_logs/parser/test_util.rs
+	modified:   src/sources/logstash.rs
+	modified:   src/sources/mongodb_metrics/mod.rs
+	modified:   src/sources/mongodb_metrics/types.rs
+	modified:   src/sources/nats.rs
+	modified:   src/sources/nginx_metrics/mod.rs
+	modified:   src/sources/postgresql_metrics.rs
+	modified:   src/sources/prometheus/parser.rs
+	modified:   src/sources/prometheus/remote_write.rs
+	modified:   src/sources/prometheus/scrape.rs
+	modified:   src/sources/socket/mod.rs
+	modified:   src/sources/socket/tcp.rs
+	modified:   src/sources/socket/udp.rs
+	modified:   src/sources/socket/unix.rs
+	new file:   src/sources/splunk_hec/mod.rs
+	modified:   src/sources/statsd/mod.rs
+	modified:   src/sources/statsd/parser.rs
+	modified:   src/sources/statsd/unix.rs
+	modified:   src/sources/stdin.rs
+	modified:   src/sources/syslog.rs
+	modified:   src/sources/util/finalizer.rs
+	modified:   src/sources/util/framestream.rs
+	modified:   src/sources/util/http/auth.rs
+	modified:   src/sources/util/http/error.rs
+	modified:   src/sources/util/http/prelude.rs
+	new file:   src/sources/util/tcp/mod.rs
+	modified:   src/sources/util/unix_datagram.rs
+	modified:   src/sources/util/unix_stream.rs
+	new file:   src/sources/util/wrappers.rs
+	modified:   src/sources/vector/mod.rs
+	modified:   src/sources/vector/v1.rs
+	modified:   src/sources/vector/v2.rs
+	modified:   src/tap/cmd.rs
+	modified:   src/tap/mod.rs
+	modified:   src/template.rs
+	modified:   src/test_util/components.rs
+	modified:   src/top/mod.rs
+	modified:   src/topology/builder.rs
+	modified:   src/topology/mod.rs
+	modified:   src/topology/running.rs
+	modified:   src/topology/task.rs
+	new file:   src/topology/test/backpressure.rs
+	modified:   src/topology/test/transient_state.rs
+	modified:   src/transforms/add_fields.rs
+	modified:   src/transforms/add_tags.rs
+	modified:   src/transforms/aggregate.rs
+	modified:   src/transforms/ansi_stripper.rs
+	modified:   src/transforms/aws_cloudwatch_logs_subscription_parser.rs
+	modified:   src/transforms/aws_ec2_metadata.rs
+	modified:   src/transforms/coercer.rs
+	modified:   src/transforms/compound.rs
+	modified:   src/transforms/concat.rs
+	modified:   src/transforms/dedupe.rs
+	modified:   src/transforms/field_filter.rs
+	modified:   src/transforms/filter.rs
+	modified:   src/transforms/geoip.rs
+	modified:   src/transforms/grok_parser.rs
+	modified:   src/transforms/json_parser.rs
+	modified:   src/transforms/key_value_parser.rs
+	modified:   src/transforms/log_to_metric.rs
+	modified:   src/transforms/logfmt_parser.rs
+	modified:   src/transforms/lua/mod.rs
+	modified:   src/transforms/lua/v1/mod.rs
+	modified:   src/transforms/lua/v2/mod.rs
+	modified:   src/transforms/merge.rs
+	modified:   src/transforms/metric_to_log.rs
+	new file:   src/transforms/noop.rs
+	new file:   src/transforms/pipelines/expander.rs
+	new file:   src/transforms/pipelines/filter.rs
+	new file:   src/transforms/pipelines/mod.rs
+	new file:   src/transforms/pipelines/router.rs
+	modified:   src/transforms/reduce/merge_strategy.rs
+	modified:   src/transforms/reduce/mod.rs
+	modified:   src/transforms/regex_parser.rs
+	modified:   src/transforms/remap.rs
+	modified:   src/transforms/remove_fields.rs
+	modified:   src/transforms/remove_tags.rs
+	modified:   src/transforms/rename_fields.rs
+	modified:   src/transforms/route.rs
+	modified:   src/transforms/sample.rs
+	modified:   src/transforms/split.rs
+	modified:   src/transforms/tag_cardinality_limit.rs
+	new file:   src/transforms/throttle.rs
+	modified:   src/transforms/tokenizer.rs
+	modified:   src/unit_test.rs
+	modified:   src/utilization.rs
+	modified:   src/validate.rs
+	modified:   src/vector_windows.rs
+	modified:   tests/api.rs
+	modified:   tests/behavior/transforms/remap.toml
+	modified:   tests/crash.rs
+	modified:   tests/shutdown.rs
+	modified:   tests/support/mod.rs
+	modified:   tests/topology.rs
+	modified:   website/config.toml
+	modified:   website/content/en/docs/administration/monitoring.md
+	modified:   website/content/en/docs/setup/installation/manual/from-source.md
+	modified:   website/content/en/docs/setup/quickstart.md
+	modified:   website/content/en/guides/level-up/managing-schemas.md
+	modified:   website/content/en/guides/level-up/transformation.md
+	modified:   website/content/en/highlights/2021-08-24-vector-source-sink.md
+	new file:   website/content/en/highlights/2021-10-19-elasticsearch-config-deprecations.md
+	new file:   website/content/en/highlights/2021-12-28-0-19-0-upgrade-guide.md
+	new file:   website/content/en/highlights/2022-02-08-0-20-0-upgrade-guide.md
+	modified:   website/cue/reference/administration/interfaces/kubectl.cue
+	modified:   website/cue/reference/cli.cue
+	modified:   website/cue/reference/components.cue
+	modified:   website/cue/reference/components/aws.cue
+	modified:   website/cue/reference/components/sinks.cue
+	modified:   website/cue/reference/components/sinks/aws_cloudwatch_logs.cue
+	modified:   website/cue/reference/components/sinks/aws_cloudwatch_metrics.cue
+	modified:   website/cue/reference/components/sinks/aws_kinesis_firehose.cue
+	modified:   website/cue/reference/components/sinks/aws_kinesis_streams.cue
+	modified:   website/cue/reference/components/sinks/aws_s3.cue
+	modified:   website/cue/reference/components/sinks/aws_sqs.cue
+	modified:   website/cue/reference/components/sinks/azure_blob.cue
+	modified:   website/cue/reference/components/sinks/azure_monitor_logs.cue
+	modified:   website/cue/reference/components/sinks/blackhole.cue
+	modified:   website/cue/reference/components/sinks/clickhouse.cue
+	modified:   website/cue/reference/components/sinks/console.cue
+	modified:   website/cue/reference/components/sinks/datadog_archives.cue
+	modified:   website/cue/reference/components/sinks/datadog_events.cue
+	modified:   website/cue/reference/components/sinks/datadog_logs.cue
+	modified:   website/cue/reference/components/sinks/datadog_metrics.cue
+	modified:   website/cue/reference/components/sinks/elasticsearch.cue
+	modified:   website/cue/reference/components/sinks/file.cue
+	modified:   website/cue/reference/components/sinks/gcp_cloud_storage.cue
+	modified:   website/cue/reference/components/sinks/gcp_pubsub.cue
+	modified:   website/cue/reference/components/sinks/gcp_stackdriver_logs.cue
+	modified:   website/cue/reference/components/sinks/gcp_stackdriver_metrics.cue
+	modified:   website/cue/reference/components/sinks/honeycomb.cue
+	modified:   website/cue/reference/components/sinks/http.cue
+	modified:   website/cue/reference/components/sinks/humio.cue
+	modified:   website/cue/reference/components/sinks/influxdb_logs.cue
+	modified:   website/cue/reference/components/sinks/influxdb_metrics.cue
+	modified:   website/cue/reference/components/sinks/kafka.cue
+	modified:   website/cue/reference/components/sinks/logdna.cue
+	modified:   website/cue/reference/components/sinks/loki.cue
+	modified:   website/cue/reference/components/sinks/nats.cue
+	new file:   website/cue/reference/components/sinks/new_relic.cue
+	modified:   website/cue/reference/components/sinks/new_relic_logs.cue
+	modified:   website/cue/reference/components/sinks/papertrail.cue
+	modified:   website/cue/reference/components/sinks/prometheus_exporter.cue
+	modified:   website/cue/reference/components/sinks/prometheus_remote_write.cue
+	modified:   website/cue/reference/components/sinks/pulsar.cue
+	modified:   website/cue/reference/components/sinks/redis.cue
+	modified:   website/cue/reference/components/sinks/sematext_logs.cue
+	modified:   website/cue/reference/components/sinks/sematext_metrics.cue
+	modified:   website/cue/reference/components/sinks/socket.cue
+	new file:   website/cue/reference/components/sinks/splunk_hec.cue
+	modified:   website/cue/reference/components/sinks/splunk_hec_logs.cue
+	modified:   website/cue/reference/components/sinks/splunk_hec_metrics.cue
+	modified:   website/cue/reference/components/sinks/statsd.cue
+	modified:   website/cue/reference/components/sinks/vector.cue
+	modified:   website/cue/reference/components/sources/aws_kinesis_firehose.cue
+	modified:   website/cue/reference/components/sources/aws_s3.cue
+	new file:   website/cue/reference/components/sources/aws_sqs.cue
+	modified:   website/cue/reference/components/sources/datadog_agent.cue
+	modified:   website/cue/reference/components/sources/file.cue
+	modified:   website/cue/reference/components/sources/fluent.cue
+	modified:   website/cue/reference/components/sources/heroku_logs.cue
+	modified:   website/cue/reference/components/sources/internal_logs.cue
+	modified:   website/cue/reference/components/sources/internal_metrics.cue
+	modified:   website/cue/reference/components/sources/journald.cue
+	modified:   website/cue/reference/components/sources/kafka.cue
+	modified:   website/cue/reference/components/sources/logstash.cue
+	modified:   website/cue/reference/components/sources/mongodb_metrics.cue
+	modified:   website/cue/reference/components/sources/postgresql_metrics.cue
+	modified:   website/cue/reference/components/sources/prometheus_remote_write.cue
+	modified:   website/cue/reference/components/sources/prometheus_scrape.cue
+	modified:   website/cue/reference/components/sources/socket.cue
+	modified:   website/cue/reference/components/sources/splunk_hec.cue
+	modified:   website/cue/reference/components/sources/statsd.cue
+	modified:   website/cue/reference/components/sources/vector.cue
+	modified:   website/cue/reference/releases/0.14.0.cue
+	new file:   website/cue/reference/releases/0.18.0.cue
+	new file:   website/cue/reference/releases/0.19.0.cue
+	modified:   website/cue/reference/releases/0.4.0.cue
+	modified:   website/cue/reference/versions.cue
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sync-vector-changes-for-MPL-compliance.log
+

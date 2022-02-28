@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
@@ -6,7 +8,6 @@ use nom::{
     sequence::{delimited, preceded},
     IResult,
 };
-use std::collections::BTreeMap;
 use vrl::prelude::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -137,12 +138,12 @@ fn parse_log(mut input: &str) -> Result<Value> {
         };
     }
     macro_rules! field {
-        ($name:expr, $($pattern:pat)|+) => {
+        ($name:expr, $($pattern:pat_param)|+) => {
             field_raw!($name, preceded(char(' '), take_while1(|c| matches!(c, $($pattern)|+))))
         };
     }
     macro_rules! field_parse {
-        ($name:expr, $($pattern:pat)|+, $type:ty) => {
+        ($name:expr, $($pattern:pat_param)|+, $type:ty) => {
             field_raw!($name, map_res(preceded(char(' '), take_while1(|c| matches!(c, $($pattern)|+))), |s: &str| s.parse::<$type>()))
         };
     }

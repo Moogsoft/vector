@@ -7,41 +7,45 @@
 //! each type of component.
 
 pub mod builder;
-pub mod fanout;
+pub use vector_core::fanout;
 mod running;
 mod task;
 
 #[cfg(test)]
 mod test;
 
+use std::{
+    collections::HashMap,
+    panic::AssertUnwindSafe,
+    sync::{Arc, Mutex},
+};
+
+use futures::{Future, FutureExt};
+pub use running::RunningTopology;
+use tokio::sync::{mpsc, watch};
+use vector_buffers::{
+    topology::channel::{BufferReceiver, BufferSender},
+    Acker,
+};
+
 use crate::{
-    buffers::{self, EventStream},
-    config::{ComponentKey, Config, ConfigDiff},
+    config::{ComponentKey, Config, ConfigDiff, OutputId},
     event::Event,
     topology::{
         builder::Pieces,
         task::{Task, TaskOutput},
     },
 };
-use futures::{Future, FutureExt};
-pub use running::RunningTopology;
-use std::{
-    collections::HashMap,
-    panic::AssertUnwindSafe,
-    pin::Pin,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::{mpsc, watch};
 
 type TaskHandle = tokio::task::JoinHandle<Result<TaskOutput, ()>>;
 
 type BuiltBuffer = (
-    buffers::BufferInputCloner<Event>,
-    Arc<Mutex<Option<Pin<EventStream>>>>,
-    buffers::Acker,
+    BufferSender<Event>,
+    Arc<Mutex<Option<BufferReceiver<Event>>>>,
+    Acker,
 );
 
-type Outputs = HashMap<ComponentKey, fanout::ControlChannel>;
+type Outputs = HashMap<OutputId, fanout::ControlChannel>;
 
 // Watcher types for topology changes. These are currently specific to receiving
 // `Outputs`. This could be expanded in the future to send an enum of types if,

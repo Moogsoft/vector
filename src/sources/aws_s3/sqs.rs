@@ -1,19 +1,8 @@
-use crate::{
-    codecs::{CharacterDelimitedCodec, FramingError},
-    config::log_schema,
-    event::Event,
-    internal_events::aws_s3::source::{
-        SqsMessageDeleteBatchFailed, SqsMessageDeletePartialFailure, SqsMessageDeleteSucceeded,
-        SqsMessageProcessingFailed, SqsMessageProcessingSucceeded, SqsMessageReceiveFailed,
-        SqsMessageReceiveSucceeded, SqsS3EventReceived, SqsS3EventRecordInvalidEventIgnored,
-    },
-    line_agg::{self, LineAgg},
-    shutdown::ShutdownSignal,
-    Pipeline,
-};
+use std::{cmp, future::ready, panic, sync::Arc};
+
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
-use futures::{FutureExt, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt};
 use lazy_static::lazy_static;
 use rusoto_core::{Region, RusotoError};
 use rusoto_s3::{GetObjectError, GetObjectRequest, S3Client, S3};
@@ -23,10 +12,23 @@ use rusoto_sqs::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::{ResultExt, Snafu};
-use std::{cmp, future::ready, panic, sync::Arc};
 use tokio::{pin, select};
 use tokio_util::codec::FramedRead;
 use tracing::Instrument;
+
+use crate::{
+    codecs::{decoding::FramingError, CharacterDelimitedDecoder},
+    config::{log_schema, AcknowledgementsConfig, SourceContext},
+    event::{BatchNotifier, BatchStatus, LogEvent},
+    internal_events::aws_s3::source::{
+        SqsMessageDeleteBatchFailed, SqsMessageDeletePartialFailure, SqsMessageDeleteSucceeded,
+        SqsMessageProcessingFailed, SqsMessageProcessingSucceeded, SqsMessageReceiveFailed,
+        SqsMessageReceiveSucceeded, SqsS3EventReceived, SqsS3EventRecordInvalidEventIgnored,
+    },
+    line_agg::{self, LineAgg},
+    shutdown::ShutdownSignal,
+    SourceSender,
+};
 
 lazy_static! {
     static ref SUPPORTED_S3S_EVENT_VERSION: semver::VersionReq =
@@ -109,7 +111,7 @@ pub enum ProcessingError {
     },
     #[snafu(display("Failed to flush all of s3://{}/{}: {}", bucket, key, source))]
     PipelineSend {
-        source: crate::pipeline::ClosedError,
+        source: crate::source_sender::ClosedError,
         bucket: String,
         key: String,
     },
@@ -126,6 +128,8 @@ pub enum ProcessingError {
     },
     #[snafu(display("Unsupported S3 event version: {}.", version,))]
     UnsupportedS3EventVersion { version: semver::Version },
+    #[snafu(display("Sink reported an error sending events"))]
+    ErrorAcknowledgement,
 }
 
 pub struct State {
@@ -178,11 +182,20 @@ impl Ingestor {
         Ok(Ingestor { state })
     }
 
-    pub(super) async fn run(self, out: Pipeline, shutdown: ShutdownSignal) -> Result<(), ()> {
+    pub(super) async fn run(
+        self,
+        cx: SourceContext,
+        acknowledgements: AcknowledgementsConfig,
+    ) -> Result<(), ()> {
+        let acknowledgements = cx.globals.acknowledgements.merge(&acknowledgements);
         let mut handles = Vec::new();
         for _ in 0..self.state.client_concurrency {
-            let process =
-                IngestorProcess::new(Arc::clone(&self.state), out.clone(), shutdown.clone());
+            let process = IngestorProcess::new(
+                Arc::clone(&self.state),
+                cx.out.clone(),
+                cx.shutdown.clone(),
+                acknowledgements.enabled(),
+            );
             let fut = async move { process.run().await };
             let handle = tokio::spawn(fut.in_current_span());
             handles.push(handle);
@@ -204,16 +217,23 @@ impl Ingestor {
 
 pub struct IngestorProcess {
     state: Arc<State>,
-    out: Pipeline,
+    out: SourceSender,
     shutdown: ShutdownSignal,
+    acknowledgements: bool,
 }
 
 impl IngestorProcess {
-    pub fn new(state: Arc<State>, out: Pipeline, shutdown: ShutdownSignal) -> Self {
+    pub fn new(
+        state: Arc<State>,
+        out: SourceSender,
+        shutdown: ShutdownSignal,
+        acknowledgements: bool,
+    ) -> Self {
         Self {
             state,
             out,
             shutdown,
+            acknowledgements,
         }
     }
 
@@ -314,7 +334,7 @@ impl IngestorProcess {
 
     async fn handle_sqs_message(&mut self, message: Message) -> Result<(), ProcessingError> {
         let s3_event: S3Event = serde_json::from_str(message.body.unwrap_or_default().as_ref())
-            .context(InvalidSqsMessage {
+            .context(InvalidSqsMessageSnafu {
                 message_id: message.message_id.unwrap_or_else(|| "<empty>".to_owned()),
             })?;
 
@@ -368,7 +388,7 @@ impl IngestorProcess {
                 ..Default::default()
             })
             .await
-            .context(GetObject {
+            .context(GetObjectSnafu {
                 bucket: s3_event.s3.bucket.name.clone(),
                 key: s3_event.s3.object.key.clone(),
             })?;
@@ -385,6 +405,8 @@ impl IngestorProcess {
 
         match object.body {
             Some(body) => {
+                let (batch, receiver) =
+                    BatchNotifier::maybe_new_with_receiver(self.acknowledgements);
                 let object_reader = super::s3_object_decoder(
                     self.state.compression,
                     &s3_event.s3.object.key,
@@ -406,9 +428,9 @@ impl IngestorProcess {
                 // prefer duplicate lines over message loss. Future work could include recording
                 // the offset of the object that has been read, but this would only be relevant in
                 // the case that the same vector instance processes the same message.
-                let mut read_error: Option<Box<dyn FramingError>> = None;
+                let mut read_error = None;
                 let lines: Box<dyn Stream<Item = Bytes> + Send + Unpin> = Box::new(
-                    FramedRead::new(object_reader, CharacterDelimitedCodec::new('\n'))
+                    FramedRead::new(object_reader, CharacterDelimitedDecoder::new(b'\n'))
                         .map(|res| {
                             res.map_err(|err| {
                                 read_error = Some(err);
@@ -434,14 +456,13 @@ impl IngestorProcess {
                 let object_key = Bytes::from(s3_event.s3.object.key.as_str().as_bytes().to_vec());
                 let aws_region = Bytes::from(s3_event.aws_region.as_str().as_bytes().to_vec());
 
-                let mut stream = lines.filter_map(|line| {
+                let mut stream = lines.filter_map(move |line| {
                     emit!(&SqsS3EventReceived {
                         byte_size: line.len()
                     });
 
-                    let mut event = Event::from(line);
+                    let mut log = LogEvent::from(line).with_batch_notifier_option(&batch);
 
-                    let log = event.as_mut_log();
                     log.insert_flat("bucket", bucket_name.clone());
                     log.insert_flat("object", object_key.clone());
                     log.insert_flat("region", aws_region.clone());
@@ -454,37 +475,47 @@ impl IngestorProcess {
                         }
                     }
 
-                    ready(Some(Ok(event)))
+                    ready(Some(log.into()))
                 });
 
                 let send_error = match self.out.send_all(&mut stream).await {
                     Ok(_) => None,
-                    Err(_) => Some(crate::pipeline::ClosedError),
+                    Err(_) => Some(crate::source_sender::ClosedError),
                 };
 
                 // Up above, `lines` captures `read_error`, and eventually is captured by `stream`,
                 // so we explicitly drop it so that we can again utilize `read_error` below.
                 drop(stream);
 
-                read_error
-                    .map(|error| {
-                        Err(ProcessingError::ReadObject {
-                            source: error,
-                            bucket: s3_event.s3.bucket.name.clone(),
-                            key: s3_event.s3.object.key.clone(),
-                        })
+                if let Some(error) = read_error {
+                    Err(ProcessingError::ReadObject {
+                        source: error,
+                        bucket: s3_event.s3.bucket.name.clone(),
+                        key: s3_event.s3.object.key.clone(),
                     })
-                    .unwrap_or_else(|| {
-                        send_error
-                            .map(|error| {
-                                Err(ProcessingError::PipelineSend {
-                                    source: error,
-                                    bucket: s3_event.s3.bucket.name.clone(),
-                                    key: s3_event.s3.object.key.clone(),
-                                })
-                            })
-                            .unwrap_or(Ok(()))
+                } else if let Some(error) = send_error {
+                    Err(ProcessingError::PipelineSend {
+                        source: error,
+                        bucket: s3_event.s3.bucket.name.clone(),
+                        key: s3_event.s3.object.key.clone(),
                     })
+                } else {
+                    match receiver {
+                        None => Ok(()),
+                        Some(receiver) => match receiver.await {
+                            BatchStatus::Delivered => Ok(()),
+                            BatchStatus::Errored => Err(ProcessingError::ErrorAcknowledgement),
+                            BatchStatus::Rejected => {
+                                error!(
+                                    message = "Sink reported events were rejected.",
+                                    internal_log_rate_secs = 5
+                                );
+                                // Failed events cannot be retried, so continue to delete the SQS source message.
+                                Ok(())
+                            }
+                        },
+                    }
+                }
             }
             None => Ok(()),
         }

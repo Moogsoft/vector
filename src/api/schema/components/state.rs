@@ -1,10 +1,12 @@
-use super::{sink, source, transform, Component};
-use crate::config::ComponentKey;
-use lazy_static::lazy_static;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
+
+use lazy_static::lazy_static;
+
+use super::{sink, source, transform, Component};
+use crate::config::{ComponentKey, OutputId};
 
 pub const INVARIANT: &str = "Couldn't acquire lock on Vector components. Please report this.";
 
@@ -71,6 +73,18 @@ pub fn component_by_component_key(component_key: &ComponentKey) -> Option<Compon
             .get(component_key)?
             .clone(),
     )
+}
+
+/// Gets a component by output_id
+pub fn component_by_output_id(output_id: &OutputId) -> Option<Component> {
+    filter_components(|(key, component)| {
+        if key == &output_id.component {
+            Some(component.clone())
+        } else {
+            None
+        }
+    })
+    .pop()
 }
 
 /// Overwrites component state with new components.

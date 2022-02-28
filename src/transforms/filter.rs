@@ -1,16 +1,25 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{
     conditions::{AnyCondition, Condition},
-    config::{DataType, GenerateConfig, TransformConfig, TransformContext, TransformDescription},
+    config::{
+        DataType, GenerateConfig, Output, TransformConfig, TransformContext, TransformDescription,
+    },
     event::Event,
     internal_events::FilterEventDiscarded,
-    transforms::{FunctionTransform, Transform},
+    transforms::{FunctionTransform, OutputBuffer, Transform},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
-struct FilterConfig {
+pub struct FilterConfig {
     condition: AnyCondition,
+}
+
+impl From<AnyCondition> for FilterConfig {
+    fn from(condition: AnyCondition) -> Self {
+        Self { condition }
+    }
 }
 
 inventory::submit! {
@@ -40,8 +49,12 @@ impl TransformConfig for FilterConfig {
         DataType::Any
     }
 
-    fn output_type(&self) -> DataType {
-        DataType::Any
+    fn outputs(&self) -> Vec<Output> {
+        vec![Output::default(DataType::Any)]
+    }
+
+    fn enable_concurrency(&self) -> bool {
+        true
     }
 
     fn transform_type(&self) -> &'static str {
@@ -63,7 +76,7 @@ impl Filter {
 }
 
 impl FunctionTransform for Filter {
-    fn transform(&mut self, output: &mut Vec<Event>, event: Event) {
+    fn transform(&mut self, output: &mut OutputBuffer, event: Event) {
         if self.condition.check(&event) {
             output.push(event);
         } else {

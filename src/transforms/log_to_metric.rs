@@ -1,22 +1,24 @@
+use std::{collections::BTreeMap, convert::TryFrom, num::ParseFloatError};
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+
 use crate::{
     config::{
-        log_schema, DataType, GenerateConfig, TransformConfig, TransformContext,
+        log_schema, DataType, GenerateConfig, Output, TransformConfig, TransformContext,
         TransformDescription,
     },
-    event::metric::{Metric, MetricKind, MetricValue, StatisticKind},
-    event::{Event, Value},
+    event::{
+        metric::{Metric, MetricKind, MetricValue, StatisticKind},
+        Event, Value,
+    },
     internal_events::{
         LogToMetricFieldNotFound, LogToMetricFieldNull, LogToMetricParseFloatError,
         LogToMetricTemplateParseError, TemplateRenderingFailed,
     },
     template::{Template, TemplateParseError, TemplateRenderingError},
-    transforms::{FunctionTransform, Transform},
+    transforms::{FunctionTransform, OutputBuffer, Transform},
 };
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::convert::TryFrom;
-use std::num::ParseFloatError;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +33,8 @@ pub struct CounterConfig {
     namespace: Option<String>,
     #[serde(default = "default_increment_by_value")]
     increment_by_value: bool,
+    #[serde(default = "default_kind")]
+    kind: MetricKind,
     tags: Option<IndexMap<String, String>>,
 }
 
@@ -92,6 +96,10 @@ const fn default_increment_by_value() -> bool {
     false
 }
 
+const fn default_kind() -> MetricKind {
+    MetricKind::Incremental
+}
+
 #[derive(Debug, Clone)]
 pub struct LogToMetric {
     config: LogToMetricConfig,
@@ -109,6 +117,7 @@ impl GenerateConfig for LogToMetricConfig {
                 name: None,
                 namespace: None,
                 increment_by_value: false,
+                kind: MetricKind::Incremental,
                 tags: None,
             })],
         })
@@ -127,8 +136,12 @@ impl TransformConfig for LogToMetricConfig {
         DataType::Log
     }
 
-    fn output_type(&self) -> DataType {
-        DataType::Metric
+    fn outputs(&self) -> Vec<Output> {
+        vec![Output::default(DataType::Metric)]
+    }
+
+    fn enable_concurrency(&self) -> bool {
+        true
     }
 
     fn transform_type(&self) -> &'static str {
@@ -242,7 +255,7 @@ fn to_metric(config: &MetricConfig, event: &Event) -> Result<Metric, TransformEr
 
             Ok(Metric::new_with_metadata(
                 name,
-                MetricKind::Incremental,
+                counter.kind,
                 MetricValue::Counter { value },
                 metadata,
             )
@@ -369,7 +382,7 @@ fn to_metric(config: &MetricConfig, event: &Event) -> Result<Metric, TransformEr
 }
 
 impl FunctionTransform for LogToMetric {
-    fn transform(&mut self, output: &mut Vec<Event>, event: Event) {
+    fn transform(&mut self, output: &mut OutputBuffer, event: Event) {
         for config in self.config.metrics.iter() {
             match to_metric(config, &event) {
                 Ok(metric) => {
@@ -404,14 +417,17 @@ impl FunctionTransform for LogToMetric {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{offset::TimeZone, DateTime, Utc};
+
     use super::*;
-    use crate::transforms::test::transform_one;
     use crate::{
         config::log_schema,
-        event::metric::{Metric, MetricKind, MetricValue, StatisticKind},
-        event::Event,
+        event::{
+            metric::{Metric, MetricKind, MetricValue, StatisticKind},
+            Event,
+        },
+        transforms::test::transform_one,
     };
-    use chrono::{offset::TimeZone, DateTime, Utc};
 
     #[test]
     fn generate_config() {
@@ -578,6 +594,36 @@ mod tests {
     }
 
     #[test]
+    fn count_absolute() {
+        let config = parse_config(
+            r#"
+            [[metrics]]
+            type = "counter"
+            field = "amount"
+            name = "amount_total"
+            increment_by_value = true
+            kind = "absolute"
+            "#,
+        );
+
+        let event = create_event("amount", "33.99");
+        let metadata = event.metadata().clone();
+        let mut transform = LogToMetric::new(config);
+        let metric = transform_one(&mut transform, event).unwrap();
+
+        assert_eq!(
+            metric.into_metric(),
+            Metric::new_with_metadata(
+                "amount_total",
+                MetricKind::Absolute,
+                MetricValue::Counter { value: 33.99 },
+                metadata,
+            )
+            .with_timestamp(Some(ts()))
+        );
+    }
+
+    #[test]
     fn memory_usage_gauge() {
         let config = parse_config(
             r#"
@@ -682,7 +728,7 @@ mod tests {
 
         let mut transform = LogToMetric::new(config);
 
-        let mut output = Vec::new();
+        let mut output = OutputBuffer::default();
         transform.transform(&mut output, event);
         assert_eq!(2, output.len());
         assert_eq!(
@@ -737,7 +783,7 @@ mod tests {
 
         let mut transform = LogToMetric::new(config);
 
-        let mut output = Vec::new();
+        let mut output = OutputBuffer::default();
         transform.transform(&mut output, event);
         assert_eq!(2, output.len());
         assert_eq!(

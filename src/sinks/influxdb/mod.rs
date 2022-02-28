@@ -1,15 +1,16 @@
 pub mod logs;
 pub mod metrics;
 
-use crate::http::HttpClient;
+use std::collections::{BTreeMap, HashMap};
+
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use http::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
-use snafu::Snafu;
-use std::collections::{BTreeMap, HashMap};
+use snafu::{ResultExt, Snafu};
 use tower::Service;
+
+use crate::http::HttpClient;
 
 pub(in crate::sinks) enum Field {
     /// string
@@ -111,7 +112,7 @@ impl InfluxDbSettings for InfluxDb2Settings {
     }
 
     fn healthcheck_uri(&self, endpoint: String) -> crate::Result<Uri> {
-        encode_uri(&endpoint, "health", &[])
+        encode_uri(&endpoint, "ping", &[])
     }
 
     fn token(&self) -> String {
@@ -170,8 +171,7 @@ fn healthcheck(
 // https://v2.docs.influxdata.com/v2.0/reference/syntax/line-protocol/
 pub(in crate::sinks) fn influx_line_protocol(
     protocol_version: ProtocolVersion,
-    measurement: String,
-    metric_type: &str,
+    measurement: &str,
     tags: Option<BTreeMap<String, String>>,
     fields: Option<HashMap<String, Field>>,
     timestamp: i64,
@@ -188,8 +188,7 @@ pub(in crate::sinks) fn influx_line_protocol(
     line_protocol.push(',');
 
     // Tags
-    let mut unwrapped_tags = tags.unwrap_or_else(BTreeMap::new);
-    unwrapped_tags.insert("metric_type".to_owned(), metric_type.to_owned());
+    let unwrapped_tags = tags.unwrap_or_default();
     encode_tags(unwrapped_tags, line_protocol);
     line_protocol.push(' ');
 
@@ -209,9 +208,9 @@ fn encode_tags(tags: BTreeMap<String, String>, output: &mut String) {
         if key.is_empty() || value.is_empty() {
             continue;
         }
-        encode_string(key.to_string(), output);
+        encode_string(&key, output);
         output.push('=');
-        encode_string(value.to_string(), output);
+        encode_string(&value, output);
         output.push(',');
     }
 
@@ -225,7 +224,7 @@ fn encode_fields(
     output: &mut String,
 ) {
     for (key, value) in fields.into_iter() {
-        encode_string(key.to_string(), output);
+        encode_string(&key, output);
         output.push('=');
         match value {
             Field::String(s) => {
@@ -262,7 +261,7 @@ fn encode_fields(
     output.pop();
 }
 
-fn encode_string(key: String, output: &mut String) {
+fn encode_string(key: &str, output: &mut String) {
     for c in key.chars() {
         if "\\, =".contains(c) {
             output.push('\\');
@@ -302,17 +301,18 @@ pub(in crate::sinks) fn encode_uri(
         url.pop();
     }
 
-    Ok(url.parse::<Uri>().context(super::UriParseError)?)
+    Ok(url.parse::<Uri>().context(super::UriParseSnafu)?)
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
 pub mod test_util {
+    use std::{fs::File, io::Read};
+
+    use chrono::{offset::TimeZone, DateTime, SecondsFormat, Utc};
+
     use super::*;
     use crate::tls;
-    use chrono::{offset::TimeZone, DateTime, SecondsFormat, Utc};
-    use std::fs::File;
-    use std::io::Read;
 
     pub(crate) const ORG: &str = "my-org";
     pub(crate) const BUCKET: &str = "my-bucket";
@@ -349,6 +349,20 @@ pub mod test_util {
                 field
             )
         }
+    }
+
+    pub(crate) fn address_v1(secure: bool) -> String {
+        if secure {
+            std::env::var("INFLUXDB_V1_HTTPS_ADDRESS")
+                .unwrap_or_else(|_| "http://localhost:8087".into())
+        } else {
+            std::env::var("INFLUXDB_V1_HTTP_ADDRESS")
+                .unwrap_or_else(|_| "http://localhost:8086".into())
+        }
+    }
+
+    pub(crate) fn address_v2() -> String {
+        std::env::var("INFLUXDB_V2_ADDRESS").unwrap_or_else(|_| "http://localhost:9999".into())
     }
 
     // ns.requests,metric_type=distribution,normal_tag=value,true_tag=true avg=1.875,count=8,max=3,median=2,min=1,quantile_0.95=3,sum=15 1542182950000000011
@@ -432,7 +446,7 @@ pub mod test_util {
         assert_eq!(status, http::StatusCode::OK, "UnexpectedStatus: {}", status);
     }
 
-    pub(crate) async fn onboarding_v2() {
+    pub(crate) async fn onboarding_v2(endpoint: &str) {
         let mut body = std::collections::HashMap::new();
         body.insert("username", "my-user");
         body.insert("password", "my-password");
@@ -446,7 +460,7 @@ pub mod test_util {
             .unwrap();
 
         let res = client
-            .post("http://localhost:9999/api/v2/setup")
+            .post(format!("{}/api/v2/setup", endpoint))
             .json(&body)
             .header("accept", "application/json")
             .send()
@@ -599,7 +613,7 @@ mod tests {
         let uri = settings
             .healthcheck_uri("http://localhost:9999".to_owned())
             .unwrap();
-        assert_eq!("http://localhost:9999/health", uri.to_string())
+        assert_eq!("http://localhost:9999/ping", uri.to_string())
     }
 
     #[test]
@@ -726,19 +740,19 @@ mod tests {
     #[test]
     fn test_encode_string() {
         let mut value = String::new();
-        encode_string("measurement_name".to_string(), &mut value);
+        encode_string("measurement_name", &mut value);
         assert_eq!(value, "measurement_name");
 
         let mut value = String::new();
-        encode_string("measurement name".to_string(), &mut value);
+        encode_string("measurement name", &mut value);
         assert_eq!(value, "measurement\\ name");
 
         let mut value = String::new();
-        encode_string("measurement=name".to_string(), &mut value);
+        encode_string("measurement=name", &mut value);
         assert_eq!(value, "measurement\\=name");
 
         let mut value = String::new();
-        encode_string("measurement,name".to_string(), &mut value);
+        encode_string("measurement,name", &mut value);
         assert_eq!(value, "measurement\\,name");
     }
 
@@ -818,16 +832,38 @@ mod integration_tests {
         http::HttpClient,
         sinks::influxdb::{
             healthcheck,
-            test_util::{next_database, onboarding_v2, BUCKET, ORG, TOKEN},
+            test_util::{address_v1, address_v2, next_database, onboarding_v2, BUCKET, ORG, TOKEN},
             InfluxDb1Settings, InfluxDb2Settings,
         },
     };
 
     #[tokio::test]
     async fn influxdb2_healthchecks_ok() {
-        onboarding_v2().await;
+        let endpoint = address_v2();
+        onboarding_v2(&endpoint).await;
 
-        let endpoint = "http://localhost:9999".to_string();
+        let endpoint = address_v2();
+        let influxdb1_settings = None;
+        let influxdb2_settings = Some(InfluxDb2Settings {
+            org: ORG.to_string(),
+            bucket: BUCKET.to_string(),
+            token: TOKEN.to_string(),
+        });
+        let proxy = ProxyConfig::default();
+        let client = HttpClient::new(None, &proxy).unwrap();
+
+        healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
+            .unwrap()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn influxdb2_healthchecks_fail() {
+        let endpoint = "http://127.0.0.1:9999".to_string();
+        onboarding_v2(&endpoint).await;
+
         let influxdb1_settings = None;
         let influxdb2_settings = Some(InfluxDb2Settings {
             org: ORG.to_string(),
@@ -841,31 +877,12 @@ mod integration_tests {
             .unwrap()
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn influxdb2_healthchecks_fail() {
-        onboarding_v2().await;
-
-        let endpoint = "http://not_exist:9999".to_string();
-        let influxdb1_settings = None;
-        let influxdb2_settings = Some(InfluxDb2Settings {
-            org: ORG.to_string(),
-            bucket: BUCKET.to_string(),
-            token: TOKEN.to_string(),
-        });
-        let proxy = ProxyConfig::default();
-        let client = HttpClient::new(None, &proxy).unwrap();
-
-        healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
-            .unwrap()
-            .await
-            .unwrap_err();
     }
 
     #[tokio::test]
     async fn influxdb1_healthchecks_ok() {
-        let endpoint = "http://localhost:8086".to_string();
+        let endpoint = address_v1(false);
+
         let influxdb1_settings = Some(InfluxDb1Settings {
             database: next_database(),
             consistency: None,
@@ -884,8 +901,9 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn influxdb1_healthchecks_fail() {
-        let endpoint = "http://not_exist:8086".to_string();
+        let endpoint = "http://127.0.0.1:8086".to_string();
         let influxdb1_settings = Some(InfluxDb1Settings {
             database: next_database(),
             consistency: None,
@@ -900,6 +918,6 @@ mod integration_tests {
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
             .await
-            .unwrap_err();
+            .unwrap();
     }
 }

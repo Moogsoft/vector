@@ -1,4 +1,6 @@
-use metrics::gauge;
+use std::borrow::Cow;
+
+use metrics::{counter, gauge};
 use vector_core::internal_event::InternalEvent;
 
 #[cfg(any(feature = "sources-file", feature = "sources-kubernetes_logs"))]
@@ -15,12 +17,35 @@ impl InternalEvent for FileOpen {
     }
 }
 
+#[derive(Debug)]
+pub struct FileBytesSent<'a> {
+    pub byte_size: usize,
+    pub file: Cow<'a, str>,
+}
+
+impl InternalEvent for FileBytesSent<'_> {
+    fn emit_logs(&self) {
+        trace!(message = "Bytes sent.", byte_size = %self.byte_size, protocol = "file", file = %self.file);
+    }
+
+    fn emit_metrics(&self) {
+        counter!(
+            "component_sent_bytes_total", self.byte_size as u64,
+            "protocol" => "file",
+            "file" => self.file.clone().into_owned(),
+        );
+    }
+}
+
 #[cfg(any(feature = "sources-file", feature = "sources-kubernetes_logs"))]
 mod source {
-    use super::{FileOpen, InternalEvent};
+    use std::{io::Error, path::Path, time::Duration};
+
     use file_source::FileSourceInternalEvents;
     use metrics::counter;
-    use std::{io::Error, path::Path, time::Duration};
+
+    use super::{FileOpen, InternalEvent};
+    use crate::emit;
 
     #[derive(Debug)]
     pub struct FileBytesReceived<'a> {

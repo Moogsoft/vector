@@ -1,9 +1,10 @@
-use crate::internal_events::KafkaStatisticsReceived;
-use crate::tls::TlsOptions;
+use std::path::{Path, PathBuf};
+
 use rdkafka::{consumer::ConsumerContext, ClientConfig, ClientContext, Statistics};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
-use std::path::{Path, PathBuf};
+
+use crate::{internal_events::KafkaStatisticsReceived, tls::TlsOptions};
 
 #[derive(Debug, Snafu)]
 enum KafkaError {
@@ -14,7 +15,7 @@ enum KafkaError {
 #[derive(Clone, Copy, Debug, Derivative, Deserialize, Serialize)]
 #[derivative(Default)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum KafkaCompression {
+pub enum KafkaCompression {
     #[derivative(Default)]
     None,
     Gzip,
@@ -24,13 +25,13 @@ pub(crate) enum KafkaCompression {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct KafkaAuthConfig {
+pub struct KafkaAuthConfig {
     pub sasl: Option<KafkaSaslConfig>,
     pub tls: Option<KafkaTlsConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct KafkaSaslConfig {
+pub struct KafkaSaslConfig {
     pub enabled: Option<bool>,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -38,14 +39,14 @@ pub(crate) struct KafkaSaslConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct KafkaTlsConfig {
+pub struct KafkaTlsConfig {
     pub enabled: Option<bool>,
     #[serde(flatten)]
     pub options: TlsOptions,
 }
 
 impl KafkaAuthConfig {
-    pub(crate) fn apply(&self, client: &mut ClientConfig) -> crate::Result<()> {
+    pub fn apply(&self, client: &mut ClientConfig) -> crate::Result<()> {
         let sasl_enabled = self.sasl.as_ref().and_then(|s| s.enabled).unwrap_or(false);
         let tls_enabled = self.tls.as_ref().and_then(|s| s.enabled).unwrap_or(false);
 
@@ -95,7 +96,7 @@ fn pathbuf_to_string(path: &Path) -> crate::Result<&str> {
         .ok_or_else(|| KafkaError::InvalidPath { path: path.into() }.into())
 }
 
-pub(crate) struct KafkaStatisticsContext;
+pub struct KafkaStatisticsContext;
 
 impl ClientContext for KafkaStatisticsContext {
     fn stats(&self, statistics: Statistics) {

@@ -1,32 +1,35 @@
-use crate::topology::builder;
-use crate::topology::fanout::{ControlChannel, ControlMessage};
-use crate::topology::{
-    build_or_log_errors, handle_errors, retain, take_healthchecks, BuiltBuffer, Outputs,
-    TaskHandle, WatchRx, WatchTx,
-};
-use crate::{
-    buffers,
-    config::{ComponentKey, Config, ConfigDiff, HealthcheckOptions, Resource},
-    event::Event,
-    shutdown::SourceShutdownCoordinator,
-    topology::{builder::Pieces, task::TaskOutput},
-    trigger::DisabledTrigger,
-};
-use futures::{future, Future, FutureExt, SinkExt};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
+
+use futures::{future, Future, FutureExt};
 use tokio::{
     sync::{mpsc, watch},
     time::{interval, sleep_until, Duration, Instant},
 };
 use tracing::Instrument;
+use vector_buffers::topology::channel::BufferSender;
+
+use crate::{
+    config::{ComponentKey, Config, ConfigDiff, HealthcheckOptions, OutputId, Resource},
+    event::Event,
+    shutdown::SourceShutdownCoordinator,
+    topology::{
+        build_or_log_errors, builder,
+        builder::Pieces,
+        fanout::{ControlChannel, ControlMessage},
+        handle_errors, retain, take_healthchecks,
+        task::TaskOutput,
+        BuiltBuffer, Outputs, TaskHandle, WatchRx, WatchTx,
+    },
+    trigger::DisabledTrigger,
+};
 
 #[allow(dead_code)]
 pub struct RunningTopology {
-    inputs: HashMap<ComponentKey, buffers::BufferInputCloner<Event>>,
-    outputs: HashMap<ComponentKey, ControlChannel>,
+    inputs: HashMap<ComponentKey, BufferSender<Event>>,
+    outputs: HashMap<OutputId, ControlChannel>,
     source_tasks: HashMap<ComponentKey, TaskHandle>,
     tasks: HashMap<ComponentKey, TaskHandle>,
     shutdown_coordinator: SourceShutdownCoordinator,
@@ -163,7 +166,7 @@ impl RunningTopology {
     }
 
     /// On Error, topology is in invalid state.
-    /// May change componenets even if reload fails.
+    /// May change components even if reload fails.
     pub async fn reload_config_and_respawn(&mut self, new_config: Config) -> Result<bool, ()> {
         if self.config.global != new_config.global {
             error!(
@@ -179,7 +182,7 @@ impl RunningTopology {
         let buffers = self.shutdown_diff(&diff, &new_config).await;
 
         // Gives windows some time to make available any port
-        // released by shutdown componenets.
+        // released by shutdown components.
         // Issue: https://github.com/timberio/vector/issues/3035
         if cfg!(windows) {
             // This value is guess work.
@@ -416,7 +419,7 @@ impl RunningTopology {
                 if reuse_buffers.contains(key) {
                     let tx = self.inputs.remove(key).unwrap();
                     let (rx, acker) = match buffer {
-                        TaskOutput::Sink(rx, acker) => (rx, acker),
+                        TaskOutput::Sink(rx, acker) => (rx.into_inner(), acker),
                         _ => unreachable!(),
                     };
 
@@ -443,7 +446,7 @@ impl RunningTopology {
         }
 
         for key in &diff.transforms.to_change {
-            self.replace_inputs(key, new_pieces).await;
+            self.replace_inputs(key, new_pieces, diff).await;
         }
 
         for key in &diff.transforms.to_add {
@@ -452,7 +455,7 @@ impl RunningTopology {
 
         // Sinks
         for key in &diff.sinks.to_change {
-            self.replace_inputs(key, new_pieces).await;
+            self.replace_inputs(key, new_pieces, diff).await;
         }
 
         for key in &diff.sinks.to_add {
@@ -569,7 +572,7 @@ impl RunningTopology {
     }
 
     fn remove_outputs(&mut self, key: &ComponentKey) {
-        self.outputs.remove(key);
+        self.outputs.retain(|id, _output| &id.component != key);
     }
 
     async fn remove_inputs(&mut self, key: &ComponentKey) {
@@ -585,39 +588,46 @@ impl RunningTopology {
             for input in inputs {
                 if let Some(output) = self.outputs.get_mut(input) {
                     // This can only fail if we are disconnected, which is a valid situation.
-                    let _ = output.send(ControlMessage::Remove(key.clone())).await;
+                    let _ = output.send(ControlMessage::Remove(key.clone()));
                 }
             }
         }
     }
 
     async fn setup_outputs(&mut self, key: &ComponentKey, new_pieces: &mut builder::Pieces) {
-        let mut output = new_pieces.outputs.remove(key).unwrap();
-
-        for (sink_key, sink) in &self.config.sinks {
-            if sink.inputs.iter().any(|i| i == key) {
-                // Sink may have been removed with the new config so it may not
-                // be present.
-                if let Some(input) = self.inputs.get(sink_key) {
-                    let _ = output
-                        .send(ControlMessage::Add(sink_key.clone(), input.get()))
-                        .await;
+        let outputs = new_pieces.outputs.remove(key).unwrap();
+        for (port, output) in outputs {
+            let id = OutputId {
+                component: key.clone(),
+                port,
+            };
+            for (sink_key, sink) in &self.config.sinks {
+                if sink.inputs.iter().any(|i| i == &id) {
+                    // Sink may have been removed with the new config so it may not
+                    // be present.
+                    if let Some(input) = self.inputs.get(sink_key) {
+                        let _ = output.send(ControlMessage::Add(
+                            sink_key.clone(),
+                            Box::pin(input.clone()),
+                        ));
+                    }
                 }
             }
-        }
-        for (transform_key, transform) in &self.config.transforms {
-            if transform.inputs.iter().any(|i| i == key) {
-                // Transform may have been removed with the new config so it may
-                // not be present.
-                if let Some(input) = self.inputs.get(transform_key) {
-                    let _ = output
-                        .send(ControlMessage::Add(transform_key.clone(), input.get()))
-                        .await;
+            for (transform_key, transform) in &self.config.transforms {
+                if transform.inputs.iter().any(|i| i == &id) {
+                    // Transform may have been removed with the new config so it may
+                    // not be present.
+                    if let Some(input) = self.inputs.get(transform_key) {
+                        let _ = output.send(ControlMessage::Add(
+                            transform_key.clone(),
+                            Box::pin(input.clone()),
+                        ));
+                    }
                 }
             }
-        }
 
-        self.outputs.insert(key.clone(), output);
+            self.outputs.insert(id.clone(), output);
+        }
     }
 
     async fn setup_inputs(&mut self, key: &ComponentKey, new_pieces: &mut builder::Pieces) {
@@ -628,9 +638,8 @@ impl RunningTopology {
             let _ = self
                 .outputs
                 .get_mut(&input)
-                .unwrap()
-                .send(ControlMessage::Add(key.clone(), tx.get()))
-                .await;
+                .expect("unknown output")
+                .send(ControlMessage::Add(key.clone(), Box::pin(tx.clone())));
         }
 
         self.inputs.insert(key.clone(), tx);
@@ -640,7 +649,12 @@ impl RunningTopology {
             .map(|trigger| self.detach_triggers.insert(key.clone(), trigger.into()));
     }
 
-    async fn replace_inputs(&mut self, key: &ComponentKey, new_pieces: &mut builder::Pieces) {
+    async fn replace_inputs(
+        &mut self,
+        key: &ComponentKey,
+        new_pieces: &mut builder::Pieces,
+        diff: &ConfigDiff,
+    ) {
         let (tx, inputs) = new_pieces.inputs.remove(key).unwrap();
 
         let sink_inputs = self.config.sinks.get(key).map(|s| &s.inputs);
@@ -654,13 +668,29 @@ impl RunningTopology {
         let new_inputs = inputs.iter().collect::<HashSet<_>>();
 
         let inputs_to_remove = &old_inputs - &new_inputs;
-        let inputs_to_add = &new_inputs - &old_inputs;
-        let inputs_to_replace = old_inputs.intersection(&new_inputs);
+        let mut inputs_to_add = &new_inputs - &old_inputs;
+        let replace_candidates = old_inputs.intersection(&new_inputs);
+        let mut inputs_to_replace = HashSet::new();
+
+        // If the source component of an input was also rebuilt, we need to send an add message
+        // instead of a replace message.
+        for input in replace_candidates {
+            if diff
+                .sources
+                .changed_and_added()
+                .chain(diff.transforms.changed_and_added())
+                .any(|key| key == &input.component)
+            {
+                inputs_to_add.insert(input);
+            } else {
+                inputs_to_replace.insert(input);
+            }
+        }
 
         for input in inputs_to_remove {
             if let Some(output) = self.outputs.get_mut(input) {
                 // This can only fail if we are disconnected, which is a valid situation.
-                let _ = output.send(ControlMessage::Remove(key.clone())).await;
+                let _ = output.send(ControlMessage::Remove(key.clone()));
             }
         }
 
@@ -670,8 +700,7 @@ impl RunningTopology {
                 .outputs
                 .get_mut(input)
                 .unwrap()
-                .send(ControlMessage::Add(key.clone(), tx.get()))
-                .await;
+                .send(ControlMessage::Add(key.clone(), Box::pin(tx.clone())));
         }
 
         for &input in inputs_to_replace {
@@ -680,8 +709,10 @@ impl RunningTopology {
                 .outputs
                 .get_mut(input)
                 .unwrap()
-                .send(ControlMessage::Replace(key.clone(), Some(tx.get())))
-                .await;
+                .send(ControlMessage::Replace(
+                    key.clone(),
+                    Some(Box::pin(tx.clone())),
+                ));
         }
 
         self.inputs.insert(key.clone(), tx);
@@ -706,8 +737,7 @@ impl RunningTopology {
                 .outputs
                 .get_mut(input)
                 .unwrap()
-                .send(ControlMessage::Replace(key.clone(), None))
-                .await;
+                .send(ControlMessage::Replace(key.clone(), None));
         }
     }
 

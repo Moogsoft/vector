@@ -1,26 +1,34 @@
-use crate::{
-    config::{self, GenerateConfig, ProxyConfig, SourceConfig, SourceContext, SourceDescription},
-    event::metric::{Metric, MetricKind, MetricValue},
-    event::Event,
-    http::HttpClient,
-    internal_events::{
-        ApacheMetricsErrorResponse, ApacheMetricsEventReceived, ApacheMetricsHttpError,
-        ApacheMetricsParseError, ApacheMetricsRequestCompleted,
-    },
-    shutdown::ShutdownSignal,
-    Pipeline,
-};
-use chrono::Utc;
-use futures::{stream, FutureExt, SinkExt, StreamExt, TryFutureExt};
-use hyper::{Body, Request};
-use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 use std::{
     collections::BTreeMap,
     future::ready,
     time::{Duration, Instant},
 };
+
+use chrono::Utc;
+use futures::{stream, FutureExt, StreamExt, TryFutureExt};
+use http::uri::Scheme;
+use hyper::{Body, Request};
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use tokio_stream::wrappers::IntervalStream;
+use vector_core::ByteSizeOf;
+
+use crate::{
+    config::{
+        self, GenerateConfig, Output, ProxyConfig, SourceConfig, SourceContext, SourceDescription,
+    },
+    event::{
+        metric::{Metric, MetricKind, MetricValue},
+        Event,
+    },
+    http::HttpClient,
+    internal_events::{
+        ApacheMetricsEventsReceived, ApacheMetricsHttpError, ApacheMetricsParseError,
+        ApacheMetricsRequestCompleted, ApacheMetricsResponseError, HttpClientBytesReceived,
+    },
+    shutdown::ShutdownSignal,
+    SourceSender,
+};
 
 mod parser;
 
@@ -67,7 +75,7 @@ impl SourceConfig for ApacheMetricsConfig {
             .iter()
             .map(|endpoint| endpoint.parse::<http::Uri>())
             .collect::<Result<Vec<_>, _>>()
-            .context(super::UriParseError)?;
+            .context(super::UriParseSnafu)?;
 
         let namespace = Some(self.namespace.clone()).filter(|namespace| !namespace.is_empty());
 
@@ -81,8 +89,8 @@ impl SourceConfig for ApacheMetricsConfig {
         ))
     }
 
-    fn output_type(&self) -> config::DataType {
-        config::DataType::Metric
+    fn outputs(&self) -> Vec<Output> {
+        vec![Output::default(config::DataType::Metric)]
     }
 
     fn source_type(&self) -> &'static str {
@@ -137,13 +145,11 @@ fn apache_metrics(
     interval: u64,
     namespace: Option<String>,
     shutdown: ShutdownSignal,
-    out: Pipeline,
+    mut out: SourceSender,
     proxy: ProxyConfig,
 ) -> super::Source {
-    let out = out.sink_map_err(|error| error!(message = "Error sending metric.", %error));
-
-    Box::pin(
-        IntervalStream::new(tokio::time::interval(Duration::from_secs(interval)))
+    Box::pin(async move {
+        let mut stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(interval)))
             .take_until(shutdown)
             .map(move |_| stream::iter(urls.clone()))
             .flatten()
@@ -180,6 +186,11 @@ fn apache_metrics(
 
                                 let byte_size = body.len();
                                 let body = String::from_utf8_lossy(&body);
+                                emit!(&HttpClientBytesReceived {
+                                    byte_size,
+                                    protocol: url.scheme().unwrap_or(&Scheme::HTTP).as_str(),
+                                    endpoint: &sanitized_url,
+                                });
 
                                 let results = parser::parse(
                                     &body,
@@ -202,24 +213,24 @@ fn apache_metrics(
                                         Err(e) => {
                                             emit!(&ApacheMetricsParseError {
                                                 error: e,
-                                                url: &sanitized_url,
+                                                endpoint: &sanitized_url,
                                             });
                                             None
                                         }
                                     })
                                     .collect::<Vec<_>>();
 
-                                emit!(&ApacheMetricsEventReceived {
-                                    byte_size,
+                                emit!(&ApacheMetricsEventsReceived {
+                                    byte_size: metrics.size_of(),
                                     count: metrics.len(),
-                                    uri: &sanitized_url,
+                                    endpoint: &sanitized_url,
                                 });
-                                Some(stream::iter(metrics).map(Event::Metric).map(Ok))
+                                Some(stream::iter(metrics).map(Event::Metric))
                             }
                             Ok((header, _)) => {
-                                emit!(&ApacheMetricsErrorResponse {
+                                emit!(&ApacheMetricsResponseError {
                                     code: header.status,
-                                    url: &sanitized_url,
+                                    endpoint: &sanitized_url,
                                 });
                                 Some(
                                     stream::iter(vec![Metric::new(
@@ -230,14 +241,13 @@ fn apache_metrics(
                                     .with_namespace(namespace.clone())
                                     .with_tags(Some(tags.clone()))
                                     .with_timestamp(Some(Utc::now()))])
-                                    .map(Event::Metric)
-                                    .map(Ok),
+                                    .map(Event::Metric),
                                 )
                             }
                             Err(error) => {
                                 emit!(&ApacheMetricsHttpError {
                                     error,
-                                    url: &sanitized_url
+                                    endpoint: &sanitized_url
                                 });
                                 Some(
                                     stream::iter(vec![Metric::new(
@@ -248,8 +258,7 @@ fn apache_metrics(
                                     .with_namespace(namespace.clone())
                                     .with_tags(Some(tags.clone()))
                                     .with_timestamp(Some(Utc::now()))])
-                                    .map(Event::Metric)
-                                    .map(Ok),
+                                    .map(Event::Metric),
                                 )
                             }
                         })
@@ -257,25 +266,40 @@ fn apache_metrics(
                     .flatten()
             })
             .flatten()
-            .forward(out)
-            .inspect(|_| info!("Finished sending.")),
-    )
+            .boxed();
+
+        match out.send_all(&mut stream).await {
+            Ok(()) => {
+                info!("Finished sending.");
+                Ok(())
+            }
+            Err(error) => {
+                error!(message = "Error sending metric.", %error);
+                Err(())
+            }
+        }
+    })
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::{
-        config::SourceConfig,
-        test_util::{collect_ready, next_addr, wait_for_tcp},
-        Error,
-    };
     use hyper::{
         service::{make_service_fn, service_fn},
-        {Body, Response, Server},
+        Body, Response, Server,
     };
     use pretty_assertions::assert_eq;
     use tokio::time::{sleep, Duration};
+
+    use super::*;
+    use crate::{
+        config::SourceConfig,
+        test_util::{
+            collect_ready,
+            components::{self, HTTP_PULL_SOURCE_TAGS, SOURCE_TESTS},
+            next_addr, wait_for_tcp,
+        },
+        Error,
+    };
 
     #[test]
     fn generate_config() {
@@ -339,8 +363,9 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
         });
         wait_for_tcp(in_addr).await;
 
-        let (tx, rx) = Pipeline::new_test();
+        let (tx, rx) = SourceSender::new_test();
 
+        components::init_test();
         let source = ApacheMetricsConfig {
             endpoints: vec![format!("http://foo:bar@{}/metrics", in_addr)],
             scrape_interval_secs: 1,
@@ -358,6 +383,8 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
             .into_iter()
             .map(|e| e.into_metric())
             .collect::<Vec<_>>();
+
+        SOURCE_TESTS.assert(&HTTP_PULL_SOURCE_TAGS);
 
         match metrics.iter().find(|m| m.name() == "up") {
             Some(m) => {
@@ -400,7 +427,7 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
         });
         wait_for_tcp(in_addr).await;
 
-        let (tx, rx) = Pipeline::new_test();
+        let (tx, rx) = SourceSender::new_test();
 
         let source = ApacheMetricsConfig {
             endpoints: vec![format!("http://{}", in_addr)],
@@ -434,7 +461,7 @@ Scoreboard: ____S_____I______R____I_______KK___D__C__G_L____________W___________
         // will have nothing bound
         let in_addr = next_addr();
 
-        let (tx, rx) = Pipeline::new_test();
+        let (tx, rx) = SourceSender::new_test();
 
         let source = ApacheMetricsConfig {
             endpoints: vec![format!("http://{}", in_addr)],
