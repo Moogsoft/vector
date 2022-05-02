@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.20.0"
+version = "0.20.1"
 authors = ["Vector Contributors <vector@datadoghq.com>"]
 edition = "2021"
 description = "A lightweight and ultra-fast tool for building observability pipelines"
@@ -619,7 +619,7 @@ transforms-logfmt_parser = ["logfmt"]
 transforms-lua = ["mlua", "vector_core/lua"]
 transforms-merge = []
 transforms-metric_to_log = []
-transforms-moogsoft = ["transforms-add_tags"]
+transforms-moogsoft = ["transforms-add_tags", "moogsoft-pipelines"]
 transforms-pipelines = ["transforms-filter"]
 transforms-reduce = []
 transforms-regex_parser = []
@@ -661,7 +661,6 @@ sinks-logs = [
   "sinks-kafka",
   "sinks-logdna",
   "sinks-loki",
-  "sinks-moogsoft",
   "sinks-nats",
   "sinks-new_relic_logs",
   "sinks-new_relic",
@@ -681,7 +680,6 @@ sinks-metrics = [
   "sinks-humio",
   "sinks-influxdb",
   "sinks-kafka",
-  "sinks-moogsoft",
   "sinks-prometheus",
   "sinks-sematext",
   "sinks-statsd",
@@ -714,7 +712,6 @@ sinks-influxdb = []
 sinks-kafka = ["rdkafka", "zstd"]
 sinks-logdna = []
 sinks-loki = []
-sinks-moogsoft = ["moogsoft-pipelines"]
 sinks-nats = ["nats"]
 sinks-new_relic_logs = ["sinks-http"]
 sinks-new_relic = []
