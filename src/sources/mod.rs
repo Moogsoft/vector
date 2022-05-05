@@ -26,6 +26,8 @@ pub mod exec;
 pub mod file;
 #[cfg(feature = "sources-fluent")]
 pub mod fluent;
+#[cfg(feature = "sources-gcp_pubsub")]
+pub mod gcp_pubsub;
 #[cfg(feature = "sources-heroku_logs")]
 pub mod heroku_logs;
 #[cfg(feature = "sources-host_metrics")]
@@ -72,7 +74,9 @@ pub mod vector;
 pub(crate) mod util;
 
 #[cfg(feature = "sources-docker_metrics")]
-mod docker_metrics;
+mod moogsoft_docker_metrics;
+#[cfg(feature = "sources-moogsoft_redis_metrics")]
+mod moogsoft_redis_metrics;
 
 pub use vector_core::source::Source;
 

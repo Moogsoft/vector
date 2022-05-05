@@ -9,7 +9,10 @@ mod ansi_stripper;
 mod apache_metrics;
 #[cfg(feature = "api")]
 mod api;
-#[cfg(feature = "transforms-aws_cloudwatch_logs_subscription_parser")]
+#[cfg(any(
+    feature = "sinks-aws_cloudwatch_logs",
+    feature = "transforms-aws_cloudwatch_logs_subscription_parser",
+))]
 mod aws_cloudwatch_logs_subscription_parser;
 #[cfg(feature = "transforms-aws_ec2_metadata")]
 mod aws_ec2_metadata;
@@ -17,14 +20,11 @@ mod aws_ec2_metadata;
 mod aws_ecs_metrics;
 #[cfg(feature = "sources-aws_kinesis_firehose")]
 mod aws_kinesis_firehose;
-#[cfg(feature = "sinks-aws_kinesis_streams")]
-mod aws_kinesis_streams;
-#[cfg(any(feature = "sinks-aws_sqs", feature = "sources-aws_s3",))]
+#[cfg(any(feature = "sources-aws_s3", feature = "sources-aws_sqs",))]
 mod aws_sqs;
 #[cfg(any(feature = "sinks-azure_blob", feature = "sinks-datadog_archives"))]
 pub(crate) mod azure_blob;
 mod batch;
-mod blackhole;
 #[cfg(feature = "transforms-coercer")]
 mod coercer;
 mod common;
@@ -33,11 +33,10 @@ mod concat;
 mod conditions;
 #[cfg(feature = "sinks-console")]
 mod console;
-#[cfg(feature = "sinks-datadog_events")]
-mod datadog_events;
 #[cfg(feature = "sinks-datadog_metrics")]
 mod datadog_metrics;
-#[cfg(any(feature = "codecs"))]
+#[cfg(feature = "sinks-datadog_traces")]
+mod datadog_traces;
 mod decoder;
 #[cfg(feature = "transforms-dedupe")]
 mod dedupe;
@@ -57,6 +56,8 @@ mod exec;
 mod filter;
 #[cfg(feature = "sources-fluent")]
 mod fluent;
+#[cfg(feature = "sources-gcp_pubsub")]
+mod gcp_pubsub;
 #[cfg(feature = "transforms-geoip")]
 mod geoip;
 mod heartbeat;
@@ -85,12 +86,15 @@ mod lua;
 mod metric_to_log;
 #[cfg(feature = "sources-mongodb_metrics")]
 mod mongodb_metrics;
+#[cfg(feature = "sources-moogsoft_redis_metrics")]
+mod moogsoft_redis_metrics;
 #[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
 mod nats;
 #[cfg(feature = "sources-nginx_metrics")]
 mod nginx_metrics;
 mod open;
 #[cfg(any(
+    feature = "sinks-datadog_events",
     feature = "transforms-geoip",
     feature = "transforms-log_to_metric",
     feature = "transforms-grok_parser",
@@ -108,10 +112,8 @@ mod process;
 #[cfg(any(feature = "sources-prometheus", feature = "sinks-prometheus"))]
 mod prometheus;
 mod pulsar;
-#[cfg(feature = "sinks-redis")]
+#[cfg(any(feature = "sources-redis", feature = "sinks-redis"))]
 mod redis;
-#[cfg(feature = "sources-redis")]
-mod redis_metrics;
 #[cfg(feature = "transforms-reduce")]
 mod reduce;
 mod remap;
@@ -119,8 +121,6 @@ mod remap;
 mod remove_fields;
 #[cfg(feature = "transforms-rename_fields")]
 mod rename_fields;
-#[cfg(feature = "transforms-route")]
-mod route;
 mod sample;
 #[cfg(feature = "sinks-sematext")]
 mod sematext_metrics;
@@ -132,6 +132,7 @@ mod statsd_sink;
 #[cfg(feature = "sources-statsd")]
 mod statsd_source;
 mod stdin;
+#[cfg(feature = "sources-syslog")]
 mod syslog;
 #[cfg(feature = "transforms-tag_cardinality_limit")]
 mod tag_cardinality_limit;
@@ -142,6 +143,8 @@ mod throttle;
 mod udp;
 mod unix;
 mod vector;
+#[cfg(feature = "sinks-websocket")]
+mod websocket;
 
 pub mod kubernetes;
 
@@ -160,7 +163,10 @@ pub(crate) use self::ansi_stripper::*;
 pub(crate) use self::apache_metrics::*;
 #[cfg(feature = "api")]
 pub(crate) use self::api::*;
-#[cfg(feature = "transforms-aws_cloudwatch_logs_subscription_parser")]
+#[cfg(any(
+    feature = "sinks-aws_cloudwatch_logs",
+    feature = "transforms-aws_cloudwatch_logs_subscription_parser",
+))]
 pub(crate) use self::aws_cloudwatch_logs_subscription_parser::*;
 #[cfg(feature = "transforms-aws_ec2_metadata")]
 pub(crate) use self::aws_ec2_metadata::*;
@@ -168,23 +174,16 @@ pub(crate) use self::aws_ec2_metadata::*;
 pub(crate) use self::aws_ecs_metrics::*;
 #[cfg(feature = "sources-aws_kinesis_firehose")]
 pub(crate) use self::aws_kinesis_firehose::*;
-#[cfg(feature = "sinks-aws_kinesis_streams")]
-pub(crate) use self::aws_kinesis_streams::*;
-#[cfg(any(feature = "sinks-aws_sqs", feature = "sources-aws_s3",))]
+#[cfg(any(feature = "sources-aws_s3", feature = "sources-aws_sqs",))]
 pub(crate) use self::aws_sqs::*;
-#[cfg(feature = "sinks-blackhole")]
-pub(crate) use self::blackhole::*;
 #[cfg(feature = "transforms-coercer")]
 pub(crate) use self::coercer::*;
 #[cfg(feature = "transforms-concat")]
 pub(crate) use self::concat::*;
-#[cfg(feature = "sinks-console")]
-pub(crate) use self::console::*;
-#[cfg(feature = "sinks-datadog_events")]
-pub(crate) use self::datadog_events::*;
 #[cfg(feature = "sinks-datadog_metrics")]
 pub(crate) use self::datadog_metrics::*;
-#[cfg(any(feature = "codecs"))]
+#[cfg(feature = "sinks-datadog_traces")]
+pub(crate) use self::datadog_traces::*;
 pub(crate) use self::decoder::*;
 #[cfg(feature = "transforms-dedupe")]
 pub(crate) use self::dedupe::*;
@@ -210,12 +209,13 @@ pub(crate) use self::file::*;
 pub(crate) use self::filter::*;
 #[cfg(feature = "sources-fluent")]
 pub(crate) use self::fluent::*;
+#[cfg(feature = "sources-gcp_pubsub")]
+pub(crate) use self::gcp_pubsub::*;
 #[cfg(feature = "transforms-geoip")]
 pub(crate) use self::geoip::*;
 #[cfg(any(
     feature = "sources-utils-http",
     feature = "sources-utils-http-encoding",
-    feature = "sinks-http",
     feature = "sources-datadog_agent",
     feature = "sources-splunk_hec",
     feature = "sources-aws_ecs_metrics",
@@ -243,11 +243,14 @@ pub(crate) use self::loki::*;
 pub(crate) use self::lua::*;
 #[cfg(feature = "transforms-metric_to_log")]
 pub(crate) use self::metric_to_log::*;
+#[cfg(feature = "sources-moogsoft_redis_metrics")]
+pub(crate) use self::moogsoft_redis_metrics::*;
 #[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
 pub(crate) use self::nats::*;
 #[cfg(feature = "sources-nginx_metrics")]
 pub(crate) use self::nginx_metrics::*;
 #[cfg(any(
+    feature = "sinks-datadog_events",
     feature = "transforms-geoip",
     feature = "transforms-log_to_metric",
     feature = "transforms-grok_parser",
@@ -265,10 +268,8 @@ pub(crate) use self::postgresql_metrics::*;
 pub(crate) use self::prometheus::*;
 #[cfg(feature = "sinks-pulsar")]
 pub(crate) use self::pulsar::*;
-#[cfg(feature = "sinks-redis")]
+#[cfg(any(feature = "sources-redis", feature = "sinks-redis"))]
 pub(crate) use self::redis::*;
-#[cfg(feature = "sources-redis")]
-pub(crate) use self::redis_metrics::*;
 #[cfg(feature = "transforms-reduce")]
 pub(crate) use self::reduce::*;
 #[cfg(feature = "transforms-remap")]
@@ -277,8 +278,6 @@ pub(crate) use self::remap::*;
 pub(crate) use self::remove_fields::*;
 #[cfg(feature = "transforms-rename_fields")]
 pub(crate) use self::rename_fields::*;
-#[cfg(feature = "transforms-route")]
-pub(crate) use self::route::*;
 #[cfg(feature = "transforms-sample")]
 pub(crate) use self::sample::*;
 #[cfg(feature = "sinks-sematext")]
@@ -312,6 +311,8 @@ pub(crate) use self::throttle::*;
 pub(crate) use self::unix::*;
 #[cfg(feature = "sources-vector")]
 pub(crate) use self::vector::*;
+#[cfg(feature = "sinks-websocket")]
+pub(crate) use self::websocket::*;
 #[cfg(windows)]
 pub(crate) use self::windows::*;
 pub(crate) use self::{
@@ -324,7 +325,7 @@ pub(crate) use self::{
 #[macro_export]
 macro_rules! emit {
     ($event:expr) => {
-        vector_core::internal_event::emit(&vector_core::internal_event::DefaultName {
+        vector_core::internal_event::emit(vector_core::internal_event::DefaultName {
             event: $event,
             name: stringify!($event),
         })
@@ -340,14 +341,14 @@ macro_rules! emit {
 }
 
 // Modules that require emit! macro so they need to be defined after the macro.
-#[cfg(feature = "sources-docker_metrics")]
-pub(crate) mod docker_metrics;
 #[cfg(any(
     feature = "sources-file",
     feature = "sources-kubernetes_logs",
     feature = "sinks-file",
 ))]
 mod file;
+#[cfg(feature = "sources-docker_metrics")]
+pub(crate) mod moogsoft_docker_metrics;
 #[cfg(feature = "moogsoft-pipelines")]
 pub mod moogsoft_provider;
 mod windows;

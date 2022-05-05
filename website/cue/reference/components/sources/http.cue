@@ -15,10 +15,11 @@ components: sources: http: {
 	}
 
 	features: {
+		acknowledgements: true
 		multiline: enabled: false
 		codecs: {
 			enabled:         true
-			default_framing: "newline_delimited"
+			default_framing: "`newline_delimited` for codecs other than `native`, which defaults to `length_delimited`"
 		}
 		receive: {
 			from: {
@@ -36,7 +37,6 @@ components: sources: http: {
 
 			tls: {
 				enabled:                true
-				can_enable:             true
 				can_verify_certificate: true
 				enabled_default:        false
 			}
