@@ -9,6 +9,8 @@ mod ansi_stripper;
 mod apache_metrics;
 #[cfg(feature = "api")]
 mod api;
+#[cfg(feature = "aws-core")]
+mod aws;
 #[cfg(any(
     feature = "sinks-aws_cloudwatch_logs",
     feature = "transforms-aws_cloudwatch_logs_subscription_parser",
@@ -31,8 +33,6 @@ mod common;
 #[cfg(feature = "transforms-concat")]
 mod concat;
 mod conditions;
-#[cfg(feature = "sinks-console")]
-mod console;
 #[cfg(feature = "sinks-datadog_metrics")]
 mod datadog_metrics;
 #[cfg(feature = "sinks-datadog_traces")]
@@ -88,7 +88,7 @@ mod metric_to_log;
 mod mongodb_metrics;
 #[cfg(feature = "sources-moogsoft_redis_metrics")]
 mod moogsoft_redis_metrics;
-#[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
+#[cfg(feature = "sinks-nats")]
 mod nats;
 #[cfg(feature = "sources-nginx_metrics")]
 mod nginx_metrics;
@@ -131,7 +131,6 @@ mod splunk_hec;
 mod statsd_sink;
 #[cfg(feature = "sources-statsd")]
 mod statsd_source;
-mod stdin;
 #[cfg(feature = "sources-syslog")]
 mod syslog;
 #[cfg(feature = "transforms-tag_cardinality_limit")]
@@ -146,7 +145,13 @@ mod vector;
 #[cfg(feature = "sinks-websocket")]
 mod websocket;
 
-pub mod kubernetes;
+#[cfg(any(
+    feature = "sources-file",
+    feature = "sources-kubernetes_logs",
+    feature = "sinks-file",
+))]
+mod file;
+mod windows;
 
 #[cfg(feature = "sources-mongodb_metrics")]
 pub(crate) use mongodb_metrics::*;
@@ -163,6 +168,8 @@ pub(crate) use self::ansi_stripper::*;
 pub(crate) use self::apache_metrics::*;
 #[cfg(feature = "api")]
 pub(crate) use self::api::*;
+#[cfg(feature = "aws-core")]
+pub(crate) use self::aws::*;
 #[cfg(any(
     feature = "sinks-aws_cloudwatch_logs",
     feature = "transforms-aws_cloudwatch_logs_subscription_parser",
@@ -218,7 +225,6 @@ pub(crate) use self::geoip::*;
     feature = "sources-utils-http-encoding",
     feature = "sources-datadog_agent",
     feature = "sources-splunk_hec",
-    feature = "sources-aws_ecs_metrics",
 ))]
 pub(crate) use self::http::*;
 #[cfg(feature = "sources-internal_logs")]
@@ -245,7 +251,7 @@ pub(crate) use self::lua::*;
 pub(crate) use self::metric_to_log::*;
 #[cfg(feature = "sources-moogsoft_redis_metrics")]
 pub(crate) use self::moogsoft_redis_metrics::*;
-#[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
+#[cfg(feature = "sinks-nats")]
 pub(crate) use self::nats::*;
 #[cfg(feature = "sources-nginx_metrics")]
 pub(crate) use self::nginx_metrics::*;
@@ -288,8 +294,6 @@ pub(crate) use self::splunk_hec::*;
 pub(crate) use self::statsd_sink::*;
 #[cfg(feature = "sources-statsd")]
 pub(crate) use self::statsd_source::*;
-#[cfg(feature = "sources-stdin")]
-pub(crate) use self::stdin::*;
 #[cfg(feature = "sources-syslog")]
 pub(crate) use self::syslog::*;
 #[cfg(feature = "transforms-tag_cardinality_limit")]
@@ -340,15 +344,7 @@ macro_rules! emit {
     };
 }
 
-// Modules that require emit! macro so they need to be defined after the macro.
-#[cfg(any(
-    feature = "sources-file",
-    feature = "sources-kubernetes_logs",
-    feature = "sinks-file",
-))]
-mod file;
 #[cfg(feature = "sources-docker_metrics")]
 pub(crate) mod moogsoft_docker_metrics;
 #[cfg(feature = "moogsoft-pipelines")]
 pub mod moogsoft_provider;
-mod windows;
