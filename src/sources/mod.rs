@@ -58,6 +58,8 @@ pub mod postgresql_metrics;
 pub mod prometheus;
 #[cfg(feature = "sources-redis")]
 pub mod redis;
+#[cfg(feature = "sources-snmp-trap")]
+pub mod snmp_trap;
 #[cfg(feature = "sources-socket")]
 pub mod socket;
 #[cfg(feature = "sources-splunk_hec")]

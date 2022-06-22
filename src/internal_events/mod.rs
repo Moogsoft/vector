@@ -124,6 +124,8 @@ mod rename_fields;
 mod sample;
 #[cfg(feature = "sinks-sematext")]
 mod sematext_metrics;
+#[cfg(feature = "sources-snmp-trap")]
+mod snmp_trap;
 mod socket;
 #[cfg(any(feature = "sources-splunk_hec", feature = "sinks-splunk_hec"))]
 mod splunk_hec;
@@ -288,6 +290,9 @@ pub(crate) use self::rename_fields::*;
 pub(crate) use self::sample::*;
 #[cfg(feature = "sinks-sematext")]
 pub(crate) use self::sematext_metrics::*;
+#[cfg(feature = "sources-snmp-trap")]
+pub use self::snmp_trap::*;
+pub(crate) use self::socket::*;
 #[cfg(any(feature = "sources-splunk_hec", feature = "sinks-splunk_hec"))]
 pub(crate) use self::splunk_hec::*;
 #[cfg(feature = "sinks-statsd")]
@@ -321,7 +326,7 @@ pub(crate) use self::websocket::*;
 pub(crate) use self::windows::*;
 pub(crate) use self::{
     adaptive_concurrency::*, batch::*, common::*, conditions::*, encoding_transcode::*,
-    heartbeat::*, open::*, process::*, socket::*, tcp::*, template::*, udp::*,
+    heartbeat::*, open::*, process::*, tcp::*, template::*, udp::*,
 };
 
 // this version won't be needed once all `InternalEvent`s implement `name()`
