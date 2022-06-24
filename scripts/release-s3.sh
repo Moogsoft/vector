@@ -67,13 +67,13 @@ verify_artifact() {
 if [[ "$CHANNEL" == "nightly" ]]; then
   # Add nightly files with the $DATE for posterity
   echo "Uploading all artifacts to s3://${S3_BUCKET}/vector/nightly/$DATE"
-  aws s3 cp "$td_nightly" "s3://${S3_BUCKET}/vector/nightly/$DATE" --recursive --sse --acl private
+  aws s3 --region ${BUCKET_REGION} cp "$td_nightly" "s3://${S3_BUCKET}/vector/nightly/$DATE" --recursive --sse --acl private
   echo "Uploaded archives"
 
   # Add "latest" nightly files
   echo "Uploading all artifacts to s3://${S3_BUCKET}/vector/nightly/latest"
-  aws s3 rm --recursive "s3://${S3_BUCKET}/vector/nightly/latest"
-  aws s3 cp "$td_nightly" "s3://${S3_BUCKET}/vector/nightly/latest" --recursive --sse --acl private
+  aws s3 --region ${BUCKET_REGION} rm --recursive "s3://${S3_BUCKET}/vector/nightly/latest"
+  aws s3 --region ${BUCKET_REGION} cp "$td_nightly" "s3://${S3_BUCKET}/vector/nightly/latest" --recursive --sse --acl private
   echo "Uploaded archives"
 
 elif [[ "$CHANNEL" == "latest" ]]; then
@@ -87,19 +87,19 @@ elif [[ "$CHANNEL" == "latest" ]]; then
     if [[ -z "$ARTIFACT_NAMESPACE" ]]; then
       # Upload the specific version
       echo "Uploading artifacts to s3://${S3_BUCKET}/vector/$i/"
-      aws s3 cp "$td" "s3://${S3_BUCKET}/vector/$i/" --recursive --sse --acl private
+      aws s3 --region ${BUCKET_REGION} cp "$td" "s3://${S3_BUCKET}/vector/$i/" --recursive --sse --acl private
 
       # Delete anything that isn't the current version
       echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/$i/"
-      aws s3 rm "s3://${S3_BUCKET}/vector/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
+      aws s3 --region ${BUCKET_REGION} rm "s3://${S3_BUCKET}/vector/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
       echo "Deleted old versioned artifacts"
     else
       echo "Uploading artifacts to s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
-      aws s3 cp "$td" "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --sse --acl private
+      aws s3 --region ${BUCKET_REGION} cp "$td" "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --sse --acl private
 
       # Delete anything that isn't the current version
       echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
-      aws s3 rm "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
+      aws s3 --region ${BUCKET_REGION} rm "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
       echo "Deleted old versioned artifacts"
       fi
   done
