@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.22.1"
+version = "0.23.1"
 authors = ["Vector Contributors <vector@datadoghq.com>"]
 edition = "2021"
 description = "A lightweight and ultra-fast tool for building observability pipelines"
@@ -225,7 +225,6 @@ vrl-stdlib = { path = "lib/vrl/stdlib" }
 
 # Moogsoft Libs
 # Moogsoft SNMP source
-#snmp-parser = { version = "0.7.0", optional = true }
 snmp-parser = { git = "https://github.com/Moogsoft/snmp-parser.git", version = "0.8.0", rev = "19e0b49b3409a06cbccb74cadff44d62b917a11f", optional = true }
 der-parser = { version = "6.0.1" }
 serde_repr = { version = "0.1.7", optional = true }
@@ -242,6 +241,16 @@ mac_address = { version = "1.1.2" }
 
 # Moogsoft Sinks
 parking_lot = { version = "0.11", default-features = false, optional = true }
+
+
+#Moogsoft Provider
+#TODO: maybe create separate Cargo.toml
+graphql_client = { version = "0.10.0", default-features = false, features = ["graphql_query_derive"] }
+# Error handling
+anyhow = { version = "1.0.57", default-features = false, features = ["std"] }
+#unpacking binary archive
+tar = "0.4.38"
+zip = "0.6.2"
 
 # External libs
 arc-swap = { version = "1.5", default-features = false, optional = true }
@@ -302,7 +311,7 @@ percent-encoding = { version = "2.1.0", default-features = false }
 pin-project = { version = "1.0.10", default-features = false }
 postgres-openssl = { version = "0.5.0", default-features = false, features = ["runtime"], optional = true }
 pulsar = { version = "4.1", default-features = false, features = ["tokio-runtime"], optional = true }
-rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
+rand = { version = "0.8.5", default-features = false, features = ["small_rng", "std_rng"] }
 rand_distr = { version = "0.4.3", default-features = false }
 rdkafka = { version = "0.27.0", default-features = false, features = ["tokio", "libz", "ssl", "zstd"], optional = true }
 redis = { version = "0.21.5", default-features = false, features = ["connection-manager", "tokio-comp", "tokio-native-tls-comp"], optional = true }
@@ -422,7 +431,7 @@ kubernetes = ["k8s-openapi", "kube"]
 
 docker = ["dirs-next"]
 
-moogsoft-pipelines = ["mongodb", "base64", "parking_lot"]
+moogsoft-pipelines = ["mongodb", "base64", "parking_lot", "semver", "api-client"]
 
 # API
 api = [
