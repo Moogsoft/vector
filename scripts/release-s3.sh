@@ -8,8 +8,10 @@ set -euo pipefail
 #   Uploads archives and packages to S3
 
 CHANNEL="${CHANNEL:-"$(scripts/release-channel.sh)"}"
-VERSION="${VERSION:-"$(scripts/version.sh)"}"
+VERSION="${VECTOR_VERSION:-"$(scripts/version.sh)"}"
 DATE="${DATE:-"$(date -u +%Y-%m-%d)"}"
+
+export AWS_REGION=us-east-1
 
 #
 # Setup
