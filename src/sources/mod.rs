@@ -70,8 +70,6 @@ pub mod postgresql_metrics;
 pub mod prometheus;
 #[cfg(feature = "sources-redis")]
 pub mod redis;
-#[cfg(feature = "sources-snmp-trap")]
-pub mod snmp_trap;
 #[cfg(feature = "sources-socket")]
 pub mod socket;
 #[cfg(feature = "sources-splunk_hec")]
@@ -259,10 +257,6 @@ pub enum Sources {
     #[cfg(feature = "sources-redis")]
     Redis(#[configurable(derived)] redis::RedisSourceConfig),
 
-    /// Log SNMP Traps
-    #[cfg(feature = "sources-snmp-trap")]
-    SnmpTrap(#[configurable(derived)] snmp_trap::SnmpTrapConfig),
-
     /// Test (backpressure).
     #[cfg(test)]
     TestBackpressure(
@@ -394,8 +388,6 @@ impl NamedComponent for Sources {
             Self::PrometheusRemoteWrite(config) => config.get_component_name(),
             #[cfg(feature = "sources-redis")]
             Self::Redis(config) => config.get_component_name(),
-            #[cfg(feature = "sources-snmp-trap")]
-            Self::SnmpTrap(config) => config.get_component_name(),
             #[cfg(test)]
             Self::TestBackpressure(config) => config.get_component_name(),
             #[cfg(test)]

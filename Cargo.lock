@@ -48,7 +48,7 @@ dependencies = [
  "cfg-if",
  "cipher 0.3.0",
  "cpufeatures",
- "opaque-debug 0.3.0",
+ "opaque-debug",
 ]
 
 [[package]]
@@ -943,7 +943,7 @@ dependencies = [
  "hex",
  "http",
  "http-body",
- "md-5 0.10.5",
+ "md-5",
  "pin-project-lite",
  "sha1",
  "sha2 0.10.6",
@@ -1177,7 +1177,7 @@ dependencies = [
  "base64",
  "bytes 1.2.1",
  "futures 0.3.24",
- "hmac 0.12.1",
+ "hmac",
  "log",
  "once_cell",
  "serde",
@@ -1320,34 +1320,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-cipher"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa136449e765dc7faa244561ccae839c394048667929af599b5d931ebe7b7f10"
-dependencies = [
- "generic-array",
-]
-
-[[package]]
-name = "block-modes"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc7143fa8aadf0a3d8140f3f558063dcfc1b3205e5e837ad59485140f1575ae8"
-dependencies = [
- "block-cipher",
- "block-padding 0.1.5",
-]
-
-[[package]]
-name = "block-padding"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa79dedbb091f449f1f39e53edf88d5dbe95f895dae6135a8d7b881fb5af73f5"
-dependencies = [
- "byte-tools",
-]
-
-[[package]]
 name = "block-padding"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,12 +1443,6 @@ name = "bumpalo"
 version = "3.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4a45a46ab1f2412e53d3a0ade76ffad2025804294569aae387231a0cd6e0899"
-
-[[package]]
-name = "byte-tools"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3b5ca7a04898ad4bcd41c90c5285445ff5b791899bb1b0abdd2a2aa791211d7"
 
 [[package]]
 name = "bytecheck"
@@ -2164,16 +2130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-mac"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b584a330336237c1eecd3e94266efb216c56ed91225d634cb2991c5f3fd1aeab"
-dependencies = [
- "generic-array",
- "subtle",
-]
-
-[[package]]
 name = "csv"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2434,29 +2390,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "der-oid-macro"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c73af209b6a5dc8ca7cbaba720732304792cddc933cfea3d74509c2b1ef2f436"
-dependencies = [
- "num-bigint 0.4.3",
- "num-traits",
- "syn",
-]
-
-[[package]]
-name = "der-parser"
-version = "6.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cddf120f700b411b2b02ebeb7f04dc0b7c8835909a6c2f52bf72ed0dd3433b2"
-dependencies = [
- "der-oid-macro",
- "nom",
- "num-traits",
- "rusticata-macros",
-]
-
-[[package]]
 name = "derivative"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2489,17 +2422,6 @@ dependencies = [
  "quote",
  "rustc_version 0.4.0",
  "syn",
-]
-
-[[package]]
-name = "des"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e6f17f2850a27f147a228d342a95bf3c613934464d77d531fe8d5151ccd9362"
-dependencies = [
- "block-cipher",
- "byteorder",
- "opaque-debug 0.2.3",
 ]
 
 [[package]]
@@ -3234,7 +3156,7 @@ version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1583cc1656d7839fd3732b80cf4f38850336cdb9b8ded1cd399ca62958de3c99"
 dependencies = [
- "opaque-debug 0.3.0",
+ "opaque-debug",
  "polyval",
 ]
 
@@ -3606,16 +3528,6 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hmac"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "126888268dcc288495a26bf004b38c5fdbb31682f992c84ceb046a1f0fe38840"
-dependencies = [
- "crypto-mac",
- "digest 0.9.0",
-]
-
-[[package]]
-name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
@@ -3936,7 +3848,7 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0c10553d664a4d0bcff9f4215d0aac67a639cc68ef660840afe309b807bc9f5"
 dependencies = [
- "block-padding 0.3.2",
+ "block-padding",
  "generic-array",
 ]
 
@@ -4666,17 +4578,6 @@ dependencies = [
 
 [[package]]
 name = "md-5"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5a279bb9607f9f53c22d496eade00d138d1bdcccd07d74650387cf94942a15"
-dependencies = [
- "block-buffer 0.9.0",
- "digest 0.9.0",
- "opaque-debug 0.3.0",
-]
-
-[[package]]
-name = "md-5"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6365506850d44bff6e2fbcb5176cf63650e48bd45ef2fe2665ae1570e0f4b9ca"
@@ -4854,9 +4755,9 @@ dependencies = [
  "futures-executor",
  "futures-util",
  "hex",
- "hmac 0.12.1",
+ "hmac",
  "lazy_static",
- "md-5 0.10.5",
+ "md-5",
  "os_info",
  "pbkdf2",
  "percent-encoding",
@@ -4867,7 +4768,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_with 1.14.0",
- "sha-1 0.10.0",
+ "sha-1",
  "sha2 0.10.6",
  "socket2",
  "stringprep",
@@ -5441,12 +5342,6 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opaque-debug"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2839e79665f131bdb5782e51f2c6c9599c133c6098982a54c794358bf432529c"
-
-[[package]]
-name = "opaque-debug"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "624a8340c38c1b80fd549087862da4ba43e08858af025b236e509b6649fc13d5"
@@ -5695,7 +5590,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "271779f35b581956db91a3e55737327a03aa051e90b1c47aeb189508533adfd7"
 dependencies = [
  "digest 0.10.5",
- "hmac 0.12.1",
+ "hmac",
  "password-hash",
  "sha2 0.10.6",
 ]
@@ -5955,7 +5850,7 @@ checksum = "8419d2b623c7c0896ff2d5d96e2cb4ede590fed28fcc34934f4c33c036e620a1"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "opaque-debug 0.3.0",
+ "opaque-debug",
  "universal-hash",
 ]
 
@@ -5995,8 +5890,8 @@ dependencies = [
  "byteorder",
  "bytes 1.2.1",
  "fallible-iterator",
- "hmac 0.12.1",
- "md-5 0.10.5",
+ "hmac",
+ "md-5",
  "memchr",
  "rand 0.8.5",
  "sha2 0.10.6",
@@ -6928,15 +6823,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusticata-macros"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
-dependencies = [
- "nom",
-]
-
-[[package]]
 name = "rustix"
 version = "0.34.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7479,19 +7365,6 @@ dependencies = [
 
 [[package]]
 name = "sha-1"
-version = "0.9.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99cd6713db3cf16b6c84e06321e049a9b9f699826e16096d23bbcc44d15d51a6"
-dependencies = [
- "block-buffer 0.9.0",
- "cfg-if",
- "cpufeatures",
- "digest 0.9.0",
- "opaque-debug 0.3.0",
-]
-
-[[package]]
-name = "sha-1"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "028f48d513f9678cda28f6e4064755b3fbb2af6acd672f2c209b62323f7aea0f"
@@ -7522,7 +7395,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest 0.9.0",
- "opaque-debug 0.3.0",
+ "opaque-debug",
 ]
 
 [[package]]
@@ -7706,31 +7579,6 @@ name = "snap"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45456094d1983e2ee2a18fdfebce3189fa451699d0502cb8e3b49dba5ba41451"
-
-[[package]]
-name = "snmp-parser"
-version = "0.8.0"
-source = "git+https://github.com/Moogsoft/snmp-parser.git?rev=19e0b49b3409a06cbccb74cadff44d62b917a11f#19e0b49b3409a06cbccb74cadff44d62b917a11f"
-dependencies = [
- "der-parser",
- "nom",
- "rusticata-macros",
- "thiserror",
-]
-
-[[package]]
-name = "snmp_usm"
-version = "0.3.0"
-source = "git+https://github.com/Moogsoft/modern_snmp.git?rev=8ca2c6a48f7f4bfe80ec13d4b0463e043d44b25b#8ca2c6a48f7f4bfe80ec13d4b0463e043d44b25b"
-dependencies = [
- "block-modes",
- "cfb-mode",
- "des",
- "hmac 0.8.1",
- "md-5 0.9.1",
- "sha-1 0.9.8",
- "yasna",
-]
 
 [[package]]
 name = "socket2"
@@ -8792,7 +8640,7 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.5",
- "sha-1 0.10.0",
+ "sha-1",
  "thiserror",
  "url",
  "utf-8",
@@ -9078,7 +8926,6 @@ checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 name = "vector"
 version = "0.25.0"
 dependencies = [
- "aes 0.8.1",
  "aes-gcm",
  "anyhow",
  "approx",
@@ -9128,7 +8975,6 @@ dependencies = [
  "csv",
  "datadog-filter",
  "datadog-search-syntax",
- "der-parser",
  "derivative",
  "dirs-next",
  "dnsmsg-parser",
@@ -9176,7 +9022,7 @@ dependencies = [
  "lru",
  "mac_address",
  "maxminddb",
- "md-5 0.10.5",
+ "md-5",
  "metrics",
  "metrics-tracing-context",
  "mlua",
@@ -9222,7 +9068,6 @@ dependencies = [
  "serde-toml-merge",
  "serde_bytes",
  "serde_json",
- "serde_repr",
  "serde_with 2.0.1",
  "serde_yaml 0.9.13",
  "sha2 0.10.6",
@@ -9230,8 +9075,6 @@ dependencies = [
  "smpl_jwt",
  "snafu",
  "snap",
- "snmp-parser",
- "snmp_usm",
  "socket2",
  "stream-cancel",
  "strip-ansi-escapes",
@@ -9649,7 +9492,7 @@ dependencies = [
  "hostname",
  "indexmap",
  "lookup",
- "md-5 0.10.5",
+ "md-5",
  "nom",
  "ofb",
  "once_cell",
@@ -9660,7 +9503,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
- "sha-1 0.10.0",
+ "sha-1",
  "sha2 0.10.6",
  "sha3",
  "strip-ansi-escapes",
@@ -10238,12 +10081,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09041cd90cf85f7f8b2df60c646f853b7f535ce68f85244eb6731cf89fa498ec"
 
 [[package]]
-name = "yasna"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0de7bff972b4f2a06c85f6d8454b09df153af7e3a4ec2aac81db1b105b684ddb"
-
-[[package]]
 name = "zerocopy"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10298,7 +10135,7 @@ dependencies = [
  "crc32fast",
  "crossbeam-utils",
  "flate2",
- "hmac 0.12.1",
+ "hmac",
  "pbkdf2",
  "sha1",
  "time",

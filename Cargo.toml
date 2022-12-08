@@ -232,12 +232,6 @@ vrl-stdlib = { path = "lib/vrl/stdlib" }
 
 
 # Moogsoft Libs
-# Moogsoft SNMP source
-snmp-parser = { git = "https://github.com/Moogsoft/snmp-parser.git", version = "0.8.0", rev = "19e0b49b3409a06cbccb74cadff44d62b917a11f", optional = true }
-der-parser = { version = "6.0.1" }
-serde_repr = { version = "0.1.7", optional = true }
-aes = { version = "0.8.0", optional = true }
-snmp_usm = { git = "https://github.com/Moogsoft/modern_snmp.git", version = "0.3.0", rev = "8ca2c6a48f7f4bfe80ec13d4b0463e043d44b25b" }
 
 # Moogsoft Security
 argon2 = { version = "0.3.1" }
@@ -516,7 +510,6 @@ sources-logs = [
   "sources-stdin",
   "sources-syslog",
   "sources-vector",
-  "sources-snmp-trap",
   "sources-nats",
 ]
 sources-metrics = [
@@ -583,7 +576,6 @@ sources-utils-http-scrape = ["sources-utils-http", "sources-http"]
 sources-utils-udp = []
 sources-utils-unix = []
 sources-vector = ["dep:tonic", "protobuf-build"]
-sources-snmp-trap = ["snmp-parser", "serde_repr"]
 sources-docker_metrics = ["docker"]
 sources-moogsoft_redis_metrics = ["dep:redis"]
 

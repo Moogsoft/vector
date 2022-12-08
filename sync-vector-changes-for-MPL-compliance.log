@@ -1226,3 +1226,19 @@ Changes not staged for commit:
   (use "git restore <file>..." to discard changes in working directory)
 	modified:   sync-vector-changes-for-MPL-compliance.log
 
+Thu Dec  8 17:21:11 UTC 2022
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   Cargo.lock
+	modified:   Cargo.toml
+	modified:   src/internal_events/mod.rs
+	modified:   src/sources/mod.rs
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sync-vector-changes-for-MPL-compliance.log
+
