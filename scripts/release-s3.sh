@@ -96,6 +96,19 @@ elif [[ "$CHANNEL" == "latest" ]]; then
       echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/$i/"
       aws s3 --region "${BUCKET_REGION}" rm "s3://${S3_BUCKET}/vector/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
       echo "Deleted old versioned artifacts"
+
+      # Delete any deprecated plugins MCP-1627
+      echo "Deleting deprecated plugins from s3://${S3_BUCKET}/vector/$i/"
+      if aws s3 --region "${BUCKET_REGION}" ls "s3://${S3_BUCKET}/vector/$i/plugins/" >> /dev/null 2>&1; then
+        for j in $(aws s3 --region "${BUCKET_REGION}" ls "s3://${S3_BUCKET}/vector/$i/plugins/" | awk '{print $2}' | sed 's/\///'); do
+          if [ ! -d "$td/plugins/$j" ]; then
+            echo "Deleting folder ${S3_BUCKET}/vector/$i/plugins/$j , this folder does not exist in the current build and we can assume this plugin is deprecated."
+            aws s3 --region "${BUCKET_REGION}" rm "s3://${S3_BUCKET}/vector/$i/plugins/$j" --recursive
+          fi
+        done
+      else
+        echo "No plugins directory detected in S3, not removing any deprecated plugins"
+      fi
     else
       echo "Uploading artifacts to s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
       aws s3 --region "${BUCKET_REGION}" cp "$td" "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --sse --acl private
@@ -104,7 +117,20 @@ elif [[ "$CHANNEL" == "latest" ]]; then
       echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
       aws s3 --region "${BUCKET_REGION}" rm "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
       echo "Deleted old versioned artifacts"
+
+      # Delete any deprecated plugins MCP-1627
+      echo "Deleting deprecated plugins from s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/"
+      if aws s3 --region "${BUCKET_REGION}" ls "s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/plugins/" >> /dev/null 2>&1; then
+        for j in $(aws s3 --region "${BUCKET_REGION}" ls "s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/plugins/" | awk '{print $2}' | sed 's/\///'); do
+          if [ ! -d "$td/plugins/$j" ]; then
+            echo "Deleting folder ${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/plugins/$j , this folder does not exist in the current build and we can assume this plugin is deprecated."
+            aws s3 --region "${BUCKET_REGION}" rm "s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/plugins/$j" --recursive
+          fi
+        done
+      else
+        echo "No plugins directory detected in S3, not removing any deprecated plugins"
       fi
+    fi
   done
 fi
 

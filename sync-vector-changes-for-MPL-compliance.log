@@ -1252,3 +1252,16 @@ Changes not staged for commit:
 	modified:   sync-vector-changes-for-MPL-compliance.log
 
 no changes added to commit (use "git add" and/or "git commit -a")
+Mon Jan  9 20:11:17 UTC 2023
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   scripts/release-s3.sh
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sync-vector-changes-for-MPL-compliance.log
+
