@@ -14,8 +14,6 @@ pub mod aws_ec2_metadata;
 pub mod dedupe;
 #[cfg(feature = "transforms-filter")]
 pub mod filter;
-#[cfg(feature = "transforms-geoip")]
-pub mod geoip;
 pub mod log_to_metric;
 #[cfg(feature = "transforms-lua")]
 pub mod lua;
@@ -45,7 +43,7 @@ pub use vector_core::transform::{
     TransformOutputsBuf,
 };
 use vector_core::{
-    config::{Input, Output},
+    config::{Input, LogNamespace, Output},
     schema,
 };
 
@@ -85,10 +83,6 @@ pub enum Transforms {
     /// Filter.
     #[cfg(feature = "transforms-filter")]
     Filter(#[configurable(derived)] filter::FilterConfig),
-
-    /// GeoIP.
-    #[cfg(feature = "transforms-geoip")]
-    Geoip(#[configurable(derived)] geoip::GeoipConfig),
 
     /// Log to metric.
     LogToMetric(#[configurable(derived)] log_to_metric::LogToMetricConfig),
@@ -176,8 +170,6 @@ impl NamedComponent for Transforms {
             Transforms::Dedupe(config) => config.get_component_name(),
             #[cfg(feature = "transforms-filter")]
             Transforms::Filter(config) => config.get_component_name(),
-            #[cfg(feature = "transforms-geoip")]
-            Transforms::Geoip(config) => config.get_component_name(),
             Transforms::LogToMetric(config) => config.get_component_name(),
             #[cfg(feature = "transforms-lua")]
             Transforms::Lua(config) => config.get_component_name(),
