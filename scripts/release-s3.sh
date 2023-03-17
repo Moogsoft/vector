@@ -87,7 +87,7 @@ elif [[ "$CHANNEL" == "latest" ]]; then
   VERSION_MAJOR_X="$(echo "$VERSION" | sed 's/\.[0-9]*\.[0-9]*$/.X/g')"
 
   for i in "$VERSION_EXACT" "$VERSION_MINOR_X" "$VERSION_MAJOR_X" "latest"; do
-    if [[ -z "$ARTIFACT_NAMESPACE" ]]; then
+    if [[ -z "$PLUGIN_NAMESPACE" ]]; then
       # Upload the specific version
       echo "Uploading artifacts to s3://${S3_BUCKET}/vector/$i/"
       aws s3 --region "${BUCKET_REGION}" cp "$td" "s3://${S3_BUCKET}/vector/$i/" --recursive --sse --acl private
@@ -110,12 +110,12 @@ elif [[ "$CHANNEL" == "latest" ]]; then
         echo "No plugins directory detected in S3, not removing any deprecated plugins"
       fi
     else
-      echo "Uploading artifacts to s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
-      aws s3 --region "${BUCKET_REGION}" cp "$td" "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --sse --acl private
+      echo "Uploading artifacts to s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/"
+      aws s3 --region "${BUCKET_REGION}" cp "$td" "s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/" --recursive --sse --acl private
 
       # Delete anything that isn't the current version
-      echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/"
-      aws s3 --region "${BUCKET_REGION}" rm "s3://${S3_BUCKET}/vector/namespaces/$ARTIFACT_NAMESPACE/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
+      echo "Deleting old artifacts from s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/"
+      aws s3 --region "${BUCKET_REGION}" rm "s3://${S3_BUCKET}/vector/namespaces/$PLUGIN_NAMESPACE/$i/" --recursive --exclude "*$VERSION_EXACT*" --exclude "*plugins*"
       echo "Deleted old versioned artifacts"
 
       # Delete any deprecated plugins MCP-1627
