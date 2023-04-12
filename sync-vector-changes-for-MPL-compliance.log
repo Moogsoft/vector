@@ -1322,3 +1322,36 @@ Changes not staged for commit:
   (use "git restore <file>..." to discard changes in working directory)
 	modified:   sync-vector-changes-for-MPL-compliance.log
 
+Wed Apr 12 19:02:11 UTC 2023
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   Cargo.lock
+	modified:   Cargo.toml
+	modified:   Makefile
+	modified:   lib/vector-core/src/tls/settings.rs
+	modified:   lib/vrl/stdlib/Cargo.toml
+	modified:   lib/vrl/stdlib/src/lib.rs
+	modified:   scripts/build.sh
+	new file:   scripts/check-one-feature
+	modified:   scripts/environment/bootstrap-windows-2019.ps1
+	modified:   scripts/environment/prepare.sh
+	modified:   scripts/package-archive.sh
+	modified:   scripts/package-deb.sh
+	modified:   scripts/package-msi.sh
+	modified:   scripts/package-rpm.sh
+	modified:   src/cli.rs
+	modified:   src/internal_events/mod.rs
+	modified:   src/main.rs
+	modified:   src/providers/mod.rs
+	modified:   src/sources/mod.rs
+	new file:   src/topology/controller.rs
+	modified:   src/transforms/mod.rs
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sync-vector-changes-for-MPL-compliance.log
+
