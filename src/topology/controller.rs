@@ -85,15 +85,17 @@ impl TopologyController {
             use std::sync::{atomic::AtomicBool, Arc};
             //FIXME
             info!("Starting api server.");
-            self.api_server = Some(
-                api::Server::start(
-                    self.topology.config(),
-                    self.topology.watch(),
-                    Arc::<AtomicBool>::clone(&self.topology.running),
-                )
-                .expect("couldn't start api server"),
-            );
-            //FIXME no expects!
+            match api::Server::start(
+                self.topology.config(),
+                self.topology.watch(),
+                Arc::<AtomicBool>::clone(&self.topology.running),
+            ) {
+                Ok(server) => self.api_server = Some(server),
+                Err(err) => {
+                    error!("Couldn't start api server: {}", err);
+                    return FatalError;
+                }
+            }
         } else if !new_config.api.enabled {
             if let Some(server) = self.api_server.take() {
                 //FIXME
