@@ -532,7 +532,7 @@ package-armv7-unknown-linux-musleabihf: target/artifacts/collector-${VERSION}-ar
 
 .PHONY: package-deb-x86_64-unknown-linux-gnu
 package-deb-x86_64-unknown-linux-gnu: package-x86_64-unknown-linux-gnu ## Build the x86_64 GNU deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -v /etc/gitconfig:/etc/gitconfig -e TARGET=x86_64-unknown-linux-gnu $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
+	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
 
 .PHONY: package-deb-x86_64-unknown-linux-musl
 package-deb-x86_64-unknown-linux-musl: package-x86_64-unknown-linux-musl ## Build the x86_64 GNU deb package
