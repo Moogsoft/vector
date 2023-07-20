@@ -1,15 +1,24 @@
-use std::{convert::Infallible, net::SocketAddr};
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use async_graphql::{
     http::{playground_source, GraphQLPlaygroundConfig, WebSocketProtocols},
     Data, Request, Schema,
 };
 use async_graphql_warp::{graphql_protocol, GraphQLResponse, GraphQLWebSocket};
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use warp::{filters::BoxedFilter, http::Response, ws::Ws, Filter, Reply};
 
 use super::{handler, schema, ShutdownTx};
-use crate::{config, topology};
+use crate::{
+    config,
+    internal_events::{SocketBindError, SocketMode},
+    topology,
+};
 
 pub struct Server {
     _shutdown: ShutdownTx,
@@ -19,24 +28,39 @@ pub struct Server {
 impl Server {
     /// Start the API server. This creates the routes and spawns a Warp server. The server is
     /// gracefully shut down when Self falls out of scope by way of the oneshot sender closing.
-    pub fn start(config: &config::Config, watch_rx: topology::WatchRx) -> Self {
-        let routes = make_routes(config.api.playground, watch_rx);
+    pub fn start(
+        config: &config::Config,
+        watch_rx: topology::WatchRx,
+        running: Arc<AtomicBool>,
+        runtime: &Handle,
+    ) -> crate::Result<Self> {
+        let routes = make_routes(config.api.playground, watch_rx, running);
 
         let (_shutdown, rx) = oneshot::channel();
-        let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
-            config.api.address.expect("No socket address"),
-            async {
-                rx.await.ok();
-            },
-        );
+        // warp uses `tokio::spawn` and so needs us to enter the runtime context.
+        let _guard = runtime.enter();
+        let (addr, server) = warp::serve(routes)
+            .try_bind_with_graceful_shutdown(
+                config.api.address.expect("No socket address"),
+                async {
+                    rx.await.ok();
+                },
+            )
+            .map_err(|error| {
+                emit!(SocketBindError {
+                    mode: SocketMode::Tcp,
+                    error: &error,
+                });
+                error
+            })?;
 
         // Update component schema with the config before starting the server.
         schema::components::update_config(config);
 
         // Spawn the server in the background.
-        tokio::spawn(server);
+        runtime.spawn(server);
 
-        Self { _shutdown, addr }
+        Ok(Self { _shutdown, addr })
     }
 
     /// Returns a copy of the SocketAddr that the server was started on.
@@ -52,11 +76,17 @@ impl Server {
     }
 }
 
-fn make_routes(playground: bool, watch_tx: topology::WatchRx) -> BoxedFilter<(impl Reply,)> {
+fn make_routes(
+    playground: bool,
+    watch_tx: topology::WatchRx,
+    running: Arc<AtomicBool>,
+) -> BoxedFilter<(impl Reply,)> {
     // Routes...
 
     // Health.
-    let health = warp::path("health").and_then(handler::health);
+    let health = warp::path("health")
+        .and(with_shared(running))
+        .and_then(handler::health);
 
     // 404.
     let not_found = warp::any().and_then(|| async { Err(warp::reject::not_found()) });
@@ -141,4 +171,10 @@ fn make_routes(playground: bool, watch_tx: topology::WatchRx) -> BoxedFilter<(im
                 .allow_methods(vec!["POST", "GET"]),
         )
         .boxed()
+}
+
+fn with_shared(
+    shared: Arc<AtomicBool>,
+) -> impl Filter<Extract = (Arc<AtomicBool>,), Error = Infallible> + Clone {
+    warp::any().map(move || Arc::<AtomicBool>::clone(&shared))
 }

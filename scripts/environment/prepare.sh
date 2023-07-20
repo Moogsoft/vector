@@ -17,10 +17,9 @@ fi
 if ! cargo deny --version >& /dev/null ; then
   cargo install cargo-deny --force --locked
 fi
-
-cd scripts
-bundle install
-cd ..
+if ! rust-license-tool --help >& /dev/null ; then
+  cargo install --git https://github.com/DataDog/rust-license-tool
+fi
 
 # Currently fixing this to version 0.30 since version 0.31 has introduced
 # a change that means it only works with versions of node > 10.

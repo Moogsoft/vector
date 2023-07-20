@@ -1411,3 +1411,38 @@ Changes not staged for commit:
 	modified:   sync-vector-changes-for-MPL-compliance.log
 
 no changes added to commit (use "git add" and/or "git commit -a")
+Thu Jul 20 22:28:06 UTC 2023
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   Cargo.lock
+	modified:   Cargo.toml
+	modified:   Makefile
+	modified:   distribution/msi/build.sh
+	modified:   lib/enrichment/src/find_enrichment_table_records.rs
+	modified:   lib/enrichment/src/get_enrichment_table_record.rs
+	modified:   lib/vector-core/src/tls/settings.rs
+	new file:   lib/vector-vrl/functions/src/set_semantic_meaning.rs
+	modified:   scripts/environment/bootstrap-ubuntu-20.04.sh
+	modified:   scripts/environment/prepare.sh
+	modified:   scripts/package-msi.sh
+	modified:   scripts/package-rpm.sh
+	modified:   src/api/server.rs
+	modified:   src/app.rs
+	modified:   src/cli.rs
+	modified:   src/internal_events/mod.rs
+	modified:   src/lib.rs
+	modified:   src/main.rs
+	modified:   src/signal.rs
+	modified:   src/sources/mod.rs
+	modified:   src/topology/controller.rs
+	new file:   vdev/src/app.rs
+	modified:   website/cue/reference/remap/functions/parse_nginx_log.cue
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sync-vector-changes-for-MPL-compliance.log
+
