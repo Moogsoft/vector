@@ -81,6 +81,7 @@ pub mod kafka;
 pub mod kubernetes;
 pub mod line_agg;
 pub mod list;
+mod moog_version;
 #[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
 pub(crate) mod nats;
 pub mod net;
@@ -119,6 +120,7 @@ pub mod validate;
 #[cfg(windows)]
 pub mod vector_windows;
 
+use crate::moog_version::moog_version;
 pub use source_sender::SourceSender;
 pub use vector_common::{shutdown, Error, Result};
 pub use vector_core::{event, metrics, schema, tcp, tls};
@@ -126,10 +128,10 @@ pub use vector_core::{event, metrics, schema, tcp, tls};
 /// The current version of Vector in simplified format.
 /// `<version-number>-nightly`.
 pub fn vector_version() -> impl std::fmt::Display {
-    #[cfg(feature = "nightly")]
-    let pkg_version = format!("{}-nightly", built_info::PKG_VERSION);
+    // #[cfg(feature = "nightly")]
+    // let pkg_version = format!("{}-nightly", built_info::PKG_VERSION);
 
-    #[cfg(not(feature = "nightly"))]
+    // #[cfg(not(feature = "nightly"))]
     // let pkg_version = match built_info::DEBUG {
     // // If any debug info is included, consider it a non-release build.
     // "1" | "2" | "true" => {
@@ -141,14 +143,13 @@ pub fn vector_version() -> impl std::fmt::Display {
     // }
     // _ => built_info::PKG_VERSION.to_string(),
     // };
-    let pkg_version = built_info::PKG_VERSION.to_string();
-
-    pkg_version
+    // let pkg_version = built_info::VECTOR_VERSION.to_string();
+    "0.31.0".to_string()
 }
 
 /// Returns a string containing full version information of the current build.
 pub fn get_version() -> String {
-    let pkg_version = vector_version();
+    let pkg_version = moog_version();
     let build_desc = built_info::VECTOR_BUILD_DESC;
     let build_string = match build_desc {
         Some(desc) => format!("{} {}", built_info::TARGET, desc),
@@ -164,7 +165,12 @@ pub fn get_version() -> String {
         _ => build_string,
     };
 
-    format!("{} ({})", pkg_version, build_string)
+    format!(
+        "{} ({}) vector {}",
+        pkg_version,
+        build_string,
+        vector_version()
+    )
 }
 
 /// Includes information about the current build.
