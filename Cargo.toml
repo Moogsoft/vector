@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.31.1"
+version = "0.31.2"
 #remember to bump the vector version when merging
 authors = ["Vector Contributors <vector@datadoghq.com>"]
 edition = "2021"
