@@ -91,6 +91,9 @@ cp -av MOOGSOFT_LICENSE "$ARCHIVE_DIR/MOOGSOFT_LICENSE$SUFFIX"
 cat LICENSE NOTICE > "$ARCHIVE_DIR/LICENSE$SUFFIX"
 cp -rv licenses "$ARCHIVE_DIR/licenses"
 
+cp -av licenses "$ARCHIVE_DIR/licenses"
+cp -av LICENSE-3rdparty.csv "$ARCHIVE_DIR"
+
 # Copy the vector binary to /bin
 
 mkdir -p "$ARCHIVE_DIR/bin"

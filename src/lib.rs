@@ -102,12 +102,12 @@ pub mod sources;
 pub mod stats;
 #[cfg(feature = "api-client")]
 #[allow(unreachable_pub)]
-mod tap;
+pub mod tap;
 pub mod template;
 pub mod test_util;
 #[cfg(feature = "api-client")]
 #[allow(unreachable_pub)]
-pub(crate) mod top;
+pub mod top;
 #[allow(unreachable_pub)]
 pub mod topology;
 pub mod trace;
@@ -144,7 +144,7 @@ pub fn vector_version() -> impl std::fmt::Display {
     // _ => built_info::PKG_VERSION.to_string(),
     // };
     // let pkg_version = built_info::VECTOR_VERSION.to_string();
-    "0.31.0".to_string()
+    "0.32.2".to_string()
 }
 
 /// Returns a string containing full version information of the current build.
