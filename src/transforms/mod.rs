@@ -6,8 +6,6 @@ use snafu::Snafu;
 
 #[cfg(feature = "transforms-aggregate")]
 pub mod aggregate;
-#[cfg(feature = "transforms-appdynamics")]
-pub mod appdynamics;
 #[cfg(feature = "transforms-aws_ec2_metadata")]
 pub mod aws_ec2_metadata;
 #[cfg(feature = "transforms-dedupe")]
