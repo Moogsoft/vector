@@ -91,7 +91,7 @@ mod moogsoft_docker_metrics;
 #[cfg(feature = "sources-moogsoft_redis_metrics")]
 mod moogsoft_redis_metrics;
 
-pub use vector_core::source::Source;
+pub use vector_lib::source::Source;
 /// Common build errors
 #[derive(Debug, Snafu)]
 enum BuildError {

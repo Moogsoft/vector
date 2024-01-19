@@ -24,6 +24,8 @@
 extern crate tracing;
 #[macro_use]
 extern crate derivative;
+#[macro_use]
+extern crate vector_lib;
 
 #[cfg(all(feature = "tikv-jemallocator", not(feature = "allocation-tracing")))]
 #[global_allocator]
@@ -66,10 +68,11 @@ pub mod async_read;
 pub mod aws;
 #[allow(unreachable_pub)]
 pub mod codecs;
-pub(crate) mod common;
+pub mod common;
 mod convert_config;
 pub mod encoding_transcode;
 pub mod enrichment_tables;
+pub mod extra_context;
 #[cfg(feature = "gcp")]
 pub mod gcp;
 pub(crate) mod graph;
@@ -94,7 +97,7 @@ pub mod serde;
 #[cfg(windows)]
 pub mod service;
 pub mod signal;
-pub(crate) mod sink;
+pub(crate) mod sink_ext;
 #[allow(unreachable_pub)]
 pub mod sinks;
 pub mod source_sender;
@@ -123,8 +126,8 @@ pub mod vector_windows;
 
 use crate::moog_version::moog_version;
 pub use source_sender::SourceSender;
-pub use vector_common::{shutdown, Error, Result};
-pub use vector_core::{event, metrics, schema, tcp, tls};
+pub use vector_lib::{event, metrics, schema, tcp, tls};
+pub use vector_lib::{shutdown, Error, Result};
 
 static APP_NAME_SLUG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -177,7 +180,7 @@ pub fn vector_version() -> impl std::fmt::Display {
     // _ => built_info::PKG_VERSION.to_string(),
     // };
     // let pkg_version = built_info::VECTOR_VERSION.to_string();
-    "0.33.0".to_string()
+    "0.35.0".to_string()
 }
 
 /// Returns a string containing full version information of the current build.
@@ -230,7 +233,10 @@ where
     T: Send + 'static,
 {
     #[cfg(tokio_unstable)]
-    return tokio::task::Builder::new().name(_name).spawn(task);
+    return tokio::task::Builder::new()
+        .name(_name)
+        .spawn(task)
+        .expect("tokio task should spawn");
 
     #[cfg(not(tokio_unstable))]
     tokio::spawn(task)
