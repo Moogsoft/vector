@@ -255,7 +255,7 @@ parking_lot = { version = "0.11", default-features = false, optional = true }
 #Moogsoft Provider
 graphql_client = { version = "0.13.0", default-features = false, features = ["graphql_query_derive"] }
 # Error handling
-anyhow = { version = "1.0.57", default-features = false, features = ["std"] }
+anyhow = { version = "1.0.59", default-features = false, features = ["std"] }
 #unpacking binary archive
 tar = "0.4.38"
 zip = "0.6.2"
