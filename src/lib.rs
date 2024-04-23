@@ -7,6 +7,7 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg), deny(rustdoc::broken_intra_doc_links))]
+#![allow(async_fn_in_trait)]
 #![allow(clippy::approx_constant)]
 #![allow(clippy::float_cmp)]
 #![allow(clippy::match_wild_err_arm)]
@@ -180,7 +181,7 @@ pub fn vector_version() -> impl std::fmt::Display {
     // _ => built_info::PKG_VERSION.to_string(),
     // };
     // let pkg_version = built_info::VECTOR_VERSION.to_string();
-    "0.35.0".to_string()
+    "0.37.1".to_string()
 }
 
 /// Returns a string containing full version information of the current build.
