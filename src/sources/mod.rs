@@ -95,6 +95,8 @@ mod moogsoft_docker_metrics;
 mod moogsoft_redis_metrics;
 
 pub use vector_lib::source::Source;
+
+#[allow(dead_code)] // Easier than listing out all the features that use this
 /// Common build errors
 #[derive(Debug, Snafu)]
 enum BuildError {

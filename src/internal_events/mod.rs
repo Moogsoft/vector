@@ -44,6 +44,13 @@ mod demo_logs;
 mod dnstap;
 #[cfg(feature = "sources-docker_logs")]
 mod docker_logs;
+
+#[cfg(feature = "sources-docker_metrics")]
+mod moogsoft_docker_metrics;
+
+#[cfg(feature = "moogsoft-pipelines")]
+mod moogsoft_provider;
+
 mod encoding_transcode;
 #[cfg(feature = "sources-eventstoredb_metrics")]
 mod eventstoredb_metrics;
@@ -110,7 +117,7 @@ mod prometheus;
 mod pulsar;
 #[cfg(feature = "sources-redis")]
 mod redis;
-#[cfg(feature = "transforms-reduce")]
+#[cfg(feature = "transforms-impl-reduce")]
 mod reduce;
 mod remap;
 mod sample;
@@ -229,6 +236,9 @@ pub(crate) use self::loki::*;
 pub(crate) use self::lua::*;
 #[cfg(feature = "transforms-metric_to_log")]
 pub(crate) use self::metric_to_log::*;
+
+#[cfg(feature = "sources-docker_metrics")]
+pub(crate) use self::moogsoft_docker_metrics::*;
 #[cfg(feature = "sources-moogsoft_redis_metrics")]
 pub(crate) use self::moogsoft_redis_metrics::*;
 #[cfg(feature = "sinks-mqtt")]
@@ -249,7 +259,7 @@ pub(crate) use self::prometheus::*;
 pub(crate) use self::pulsar::*;
 #[cfg(feature = "sources-redis")]
 pub(crate) use self::redis::*;
-#[cfg(feature = "transforms-reduce")]
+#[cfg(feature = "transforms-impl-reduce")]
 pub(crate) use self::reduce::*;
 #[cfg(feature = "transforms-remap")]
 pub(crate) use self::remap::*;
@@ -276,7 +286,5 @@ pub use self::{
     heartbeat::*, http::*, open::*, process::*, socket::*, tcp::*, template::*, udp::*,
 };
 
-#[cfg(feature = "sources-docker_metrics")]
-pub(crate) mod moogsoft_docker_metrics;
 #[cfg(feature = "moogsoft-pipelines")]
-pub mod moogsoft_provider;
+pub(crate) use self::moogsoft_provider::*;

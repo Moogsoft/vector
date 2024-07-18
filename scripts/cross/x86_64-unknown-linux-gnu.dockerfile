@@ -1,8 +1,5 @@
-FROM docker.io/rustembedded/cross:x86_64-unknown-linux-gnu
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5
 
-COPY bootstrap-rhel.sh .
-RUN ./bootstrap-rhel.sh
+COPY scripts/cross/bootstrap-ubuntu.sh scripts/cross/bootstrap-ubuntu.sh scripts/environment/install-protoc.sh /
+RUN /bootstrap-ubuntu.sh && bash /install-protoc.sh
 
-ENV LIBCLANG_PATH=/opt/rh/llvm-toolset-7/root/usr/lib64/ \
-  LIBCLANG_STATIC_PATH=/opt/rh/llvm-toolset-7/root/usr/lib64/ \
-  CLANG_PATH=/opt/rh/llvm-toolset-7/root/usr/bin/clang
