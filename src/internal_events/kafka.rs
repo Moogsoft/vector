@@ -1,31 +1,67 @@
 use metrics::{counter, gauge};
-
-use vector_core::{internal_event::InternalEvent, update_counter};
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::{
+    internal_event::{error_stage, error_type},
+    json_size::JsonSize,
+};
+use vrl::path::OwnedTargetPath;
 
 #[derive(Debug)]
-pub struct KafkaEventsReceived {
+pub struct KafkaBytesReceived<'a> {
     pub byte_size: usize,
-    pub count: usize,
+    pub protocol: &'static str,
+    pub topic: &'a str,
+    pub partition: i32,
 }
 
-impl InternalEvent for KafkaEventsReceived {
-    fn emit_logs(&self) {
+impl<'a> InternalEvent for KafkaBytesReceived<'a> {
+    fn emit(self) {
         trace!(
-            message = "Received events.",
+            message = "Bytes received.",
+            byte_size = %self.byte_size,
+            protocol = %self.protocol,
+            topic = self.topic,
+            partition = %self.partition,
+        );
+        counter!(
+            "component_received_bytes_total",
+            "protocol" => self.protocol,
+            "topic" => self.topic.to_string(),
+            "partition" => self.partition.to_string(),
+        )
+        .increment(self.byte_size as u64);
+    }
+}
+
+#[derive(Debug)]
+pub struct KafkaEventsReceived<'a> {
+    pub byte_size: JsonSize,
+    pub count: usize,
+    pub topic: &'a str,
+    pub partition: i32,
+}
+
+impl<'a> InternalEvent for KafkaEventsReceived<'a> {
+    fn emit(self) {
+        trace!(
+            message = "Events received.",
             count = %self.count,
             byte_size = %self.byte_size,
+            topic = self.topic,
+            partition = %self.partition,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("component_received_events_total", self.count as u64);
+        counter!(
+            "component_received_events_total",
+            "topic" => self.topic.to_string(),
+            "partition" => self.partition.to_string(),
+        )
+        .increment(self.count as u64);
         counter!(
             "component_received_event_bytes_total",
-            self.byte_size as u64
-        );
-        // deprecated
-        counter!("events_in_total", self.count as u64);
-        counter!("processed_bytes_total", self.byte_size as u64);
+            "topic" => self.topic.to_string(),
+            "partition" => self.partition.to_string(),
+        )
+        .increment(self.byte_size.get() as u64);
     }
 }
 
@@ -35,24 +71,22 @@ pub struct KafkaOffsetUpdateError {
 }
 
 impl InternalEvent for KafkaOffsetUpdateError {
-    fn emit_logs(&self) {
+    fn emit(self) {
         error!(
             message = "Unable to update consumer offset.",
             error = %self.error,
-            error_type = "kafka_offset_update",
-            stage = "sending",
+            error_code = "kafka_offset_update",
+            error_type = error_type::READER_FAILED,
+            stage = error_stage::SENDING,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error" => self.error.to_string(),
-            "error_type" => "kafka_offset_update",
-            "stage" => "sending",
-        );
-        // deprecated
-        counter!("consumer_offset_updates_failed_total", 1);
+            "component_errors_total",
+            "error_code" => "kafka_offset_update",
+            "error_type" => error_type::READER_FAILED,
+            "stage" => error_stage::SENDING,
+        )
+        .increment(1);
     }
 }
 
@@ -62,92 +96,81 @@ pub struct KafkaReadError {
 }
 
 impl InternalEvent for KafkaReadError {
-    fn emit_logs(&self) {
+    fn emit(self) {
         error!(
             message = "Failed to read message.",
             error = %self.error,
-            error_type = "kafka_read",
-            stage = "receiving",
+            error_code = "reading_message",
+            error_type = error_type::READER_FAILED,
+            stage = error_stage::RECEIVING,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error" => self.error.to_string(),
-            "error_type" => "kafka_read",
-            "stage" => "receiving",
-        );
-        // deprecated
-        counter!("events_failed_total", 1);
-    }
-}
-
-#[derive(Debug)]
-pub struct KafkaKeyExtractionFailed<'a> {
-    pub key_field: &'a str,
-}
-
-impl InternalEvent for KafkaKeyExtractionFailed<'_> {
-    fn emit_logs(&self) {
-        error!(message = "Failed to extract key.", key_field = %self.key_field);
+            "component_errors_total",
+            "error_code" => "reading_message",
+            "error_type" => error_type::READER_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }
 
 #[derive(Debug)]
 pub struct KafkaStatisticsReceived<'a> {
     pub statistics: &'a rdkafka::Statistics,
+    pub expose_lag_metrics: bool,
 }
 
 impl InternalEvent for KafkaStatisticsReceived<'_> {
-    fn emit_metrics(&self) {
-        gauge!("kafka_queue_messages", self.statistics.msg_cnt as f64);
-        gauge!(
-            "kafka_queue_messages_bytes",
-            self.statistics.msg_size as f64
-        );
-        update_counter!("kafka_requests_total", self.statistics.tx as u64);
-        update_counter!(
-            "kafka_requests_bytes_total",
-            self.statistics.tx_bytes as u64
-        );
-        update_counter!("kafka_responses_total", self.statistics.rx as u64);
-        update_counter!(
-            "kafka_responses_bytes_total",
-            self.statistics.rx_bytes as u64
-        );
-        update_counter!(
-            "kafka_produced_messages_total",
-            self.statistics.txmsgs as u64
-        );
-        update_counter!(
-            "kafka_produced_messages_bytes_total",
-            self.statistics.txmsg_bytes as u64
-        );
-        update_counter!(
-            "kafka_consumed_messages_total",
-            self.statistics.rxmsgs as u64
-        );
-        update_counter!(
-            "kafka_consumed_messages_bytes_total",
-            self.statistics.rxmsg_bytes as u64
-        );
+    fn emit(self) {
+        gauge!("kafka_queue_messages").set(self.statistics.msg_cnt as f64);
+        gauge!("kafka_queue_messages_bytes").set(self.statistics.msg_size as f64);
+        counter!("kafka_requests_total").absolute(self.statistics.tx as u64);
+        counter!("kafka_requests_bytes_total").absolute(self.statistics.tx_bytes as u64);
+        counter!("kafka_responses_total").absolute(self.statistics.rx as u64);
+        counter!("kafka_responses_bytes_total").absolute(self.statistics.rx_bytes as u64);
+        counter!("kafka_produced_messages_total").absolute(self.statistics.txmsgs as u64);
+        counter!("kafka_produced_messages_bytes_total")
+            .absolute(self.statistics.txmsg_bytes as u64);
+        counter!("kafka_consumed_messages_total").absolute(self.statistics.rxmsgs as u64);
+        counter!("kafka_consumed_messages_bytes_total")
+            .absolute(self.statistics.rxmsg_bytes as u64);
+
+        if self.expose_lag_metrics {
+            for (topic_id, topic) in &self.statistics.topics {
+                for (partition_id, partition) in &topic.partitions {
+                    gauge!(
+                        "kafka_consumer_lag",
+                        "topic_id" => topic_id.clone(),
+                        "partition_id" => partition_id.to_string(),
+                    )
+                    .set(partition.consumer_lag as f64);
+                }
+            }
+        }
     }
 }
 
-pub struct KafkaHeaderExtractionFailed<'a> {
-    pub header_field: &'a str,
+pub struct KafkaHeaderExtractionError<'a> {
+    pub header_field: &'a OwnedTargetPath,
 }
 
-impl InternalEvent for KafkaHeaderExtractionFailed<'_> {
-    fn emit_logs(&self) {
+impl InternalEvent for KafkaHeaderExtractionError<'_> {
+    fn emit(self) {
         error!(
             message = "Failed to extract header. Value should be a map of String -> Bytes.",
-            header_field = self.header_field
+            error_code = "extracting_header",
+            error_type = error_type::PARSER_FAILED,
+            stage = error_stage::RECEIVING,
+            header_field = self.header_field.to_string(),
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("kafka_header_extraction_failures_total", 1);
+        counter!(
+            "component_errors_total",
+            "error_code" => "extracting_header",
+            "error_type" => error_type::PARSER_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }

@@ -1,7 +1,44 @@
-use std::error::Error;
+use std::{error::Error, time::Duration};
 
-use metrics::counter;
-use vector_core::internal_event::InternalEvent;
+use http::Response;
+use metrics::{counter, histogram};
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::{
+    internal_event::{error_stage, error_type},
+    json_size::JsonSize,
+};
+
+const HTTP_STATUS_LABEL: &str = "status";
+
+#[derive(Debug)]
+pub struct HttpServerRequestReceived;
+
+impl InternalEvent for HttpServerRequestReceived {
+    fn emit(self) {
+        debug!(
+            message = "Received HTTP request.",
+            internal_log_rate_limit = true
+        );
+        counter!("http_server_requests_received_total").increment(1);
+    }
+}
+
+#[derive(Debug)]
+pub struct HttpServerResponseSent<'a, B> {
+    pub response: &'a Response<B>,
+    pub latency: Duration,
+}
+
+impl<'a, B> InternalEvent for HttpServerResponseSent<'a, B> {
+    fn emit(self) {
+        let labels = &[(
+            HTTP_STATUS_LABEL,
+            self.response.status().as_u16().to_string(),
+        )];
+        counter!("http_server_responses_sent_total", labels).increment(1);
+        histogram!("http_server_handler_duration_seconds", labels).record(self.latency);
+    }
+}
 
 #[derive(Debug)]
 pub struct HttpBytesReceived<'a> {
@@ -11,110 +48,92 @@ pub struct HttpBytesReceived<'a> {
 }
 
 impl InternalEvent for HttpBytesReceived<'_> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         trace!(
-            message = "Received bytes.",
+            message = "Bytes received.",
             byte_size = %self.byte_size,
             http_path = %self.http_path,
             protocol = %self.protocol
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_received_bytes_total", self.byte_size as u64,
+            "component_received_bytes_total",
             "http_path" => self.http_path.to_string(),
             "protocol" => self.protocol,
-        );
+        )
+        .increment(self.byte_size as u64);
     }
 }
 
 #[derive(Debug)]
 pub struct HttpEventsReceived<'a> {
     pub count: usize,
-    pub byte_size: usize,
+    pub byte_size: JsonSize,
     pub http_path: &'a str,
     pub protocol: &'static str,
 }
 
 impl InternalEvent for HttpEventsReceived<'_> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         trace!(
-            message = "Received events.",
+            message = "Events received.",
             count = %self.count,
             byte_size = %self.byte_size,
             http_path = %self.http_path,
             protocol = %self.protocol,
         );
-    }
 
-    fn emit_metrics(&self) {
+        histogram!("component_received_events_count").record(self.count as f64);
         counter!(
-            "component_received_events_total", self.count as u64,
+            "component_received_events_total",
             "http_path" => self.http_path.to_string(),
             "protocol" => self.protocol,
-        );
+        )
+        .increment(self.count as u64);
         counter!(
             "component_received_event_bytes_total",
-            self.byte_size as u64,
             "http_path" => self.http_path.to_string(),
             "protocol" => self.protocol,
-        );
-        counter!("events_in_total", self.count as u64);
-        counter!("processed_bytes_total", self.byte_size as u64);
+        )
+        .increment(self.byte_size.get() as u64);
     }
 }
 
 #[derive(Debug)]
 pub struct HttpBadRequest<'a> {
-    pub error_code: u16,
-    pub error_message: &'a str,
+    code: u16,
+    error_code: String,
+    message: &'a str,
+}
+
+#[cfg(feature = "sources-utils-http")]
+impl<'a> HttpBadRequest<'a> {
+    pub fn new(code: u16, message: &'a str) -> Self {
+        Self {
+            code,
+            error_code: super::prelude::http_error_code(code),
+            message,
+        }
+    }
 }
 
 impl<'a> InternalEvent for HttpBadRequest<'a> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         warn!(
             message = "Received bad request.",
-            code = ?self.error_code,
-            error_message = ?self.error_message,
-            internal_log_rate_secs = 10,
+            error = %self.message,
+            error_code = %self.error_code,
+            error_type = error_type::REQUEST_FAILED,
+            error_stage = error_stage::RECEIVING,
+            http_code = %self.code,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("http_bad_requests_total", 1);
-    }
-}
-
-#[derive(Debug)]
-pub struct HttpEventMissingMessage;
-
-impl InternalEvent for HttpEventMissingMessage {
-    fn emit_logs(&self) {
-        warn!(
-            message = "Event missing the message key; dropping event.",
-            internal_log_rate_secs = 30,
-        );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("events_discarded_total", 1);
-        counter!("component_discarded_events_total", 1);
-    }
-}
-
-#[derive(Debug)]
-pub struct HttpEventEncoded {
-    pub byte_size: usize,
-}
-
-impl InternalEvent for HttpEventEncoded {
-    fn emit_logs(&self) {
-        trace!(message = "Encode event.");
-    }
-
-    fn emit_metrics(&self) {
-        counter!("processed_bytes_total", self.byte_size as u64);
+        counter!(
+            "component_errors_total",
+            "error_code" => self.error_code,
+            "error_type" => error_type::REQUEST_FAILED,
+            "error_stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }
 
@@ -125,23 +144,43 @@ pub struct HttpDecompressError<'a> {
 }
 
 impl<'a> InternalEvent for HttpDecompressError<'a> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         error!(
             message = "Failed decompressing payload.",
-            encoding= %self.encoding,
             error = %self.error,
-            stage = "receiving",
-            internal_log_rate_secs = 10
+            error_code = "failed_decompressing_payload",
+            error_type = error_type::PARSER_FAILED,
+            stage = error_stage::RECEIVING,
+            encoding = %self.encoding,
+            internal_log_rate_limit = true
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("parse_errors_total", 1);
         counter!(
-            "component_errors_total", 1,
-            "error_type" => "parse_failed",
-            "stage" => "receiving",
-            "encoding" => self.encoding.to_string(),
+            "component_errors_total",
+            "error_code" => "failed_decompressing_payload",
+            "error_type" => error_type::PARSER_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
+    }
+}
+
+pub struct HttpInternalError<'a> {
+    pub message: &'a str,
+}
+
+impl<'a> InternalEvent for HttpInternalError<'a> {
+    fn emit(self) {
+        error!(
+            message = %self.message,
+            error_type = error_type::CONNECTION_FAILED,
+            stage = error_stage::RECEIVING,
+            internal_log_rate_limit = true
         );
+        counter!(
+            "component_errors_total",
+            "error_type" => error_type::CONNECTION_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }

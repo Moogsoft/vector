@@ -1,60 +1,37 @@
-// ## skip check-events ##
-
-use std::time::Instant;
-
-use metrics::{counter, histogram};
-use vector_core::internal_event::InternalEvent;
+use metrics::counter;
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::{
+    internal_event::{error_stage, error_type},
+    json_size::JsonSize,
+};
 
 use crate::sources::nginx_metrics::parser::ParseError;
 
 #[derive(Debug)]
 pub struct NginxMetricsEventsReceived<'a> {
-    pub byte_size: usize,
+    pub byte_size: JsonSize,
     pub count: usize,
-    pub uri: &'a str,
+    pub endpoint: &'a str,
 }
 
 impl<'a> InternalEvent for NginxMetricsEventsReceived<'a> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         trace!(
             message = "Events received.",
             byte_size = %self.byte_size,
             count = %self.count,
-            uri = self.uri,
-        );
-    }
-
-    fn emit_metrics(&self) {
-        counter!(
-            "component_received_events_total", self.count as u64,
-            "uri" => self.uri.to_owned(),
+            endpoint = self.endpoint,
         );
         counter!(
-            "component_received_event_bytes_total", self.byte_size as u64,
-            "uri" => self.uri.to_owned(),
-        );
-        // deprecated
+            "component_received_events_total",
+            "endpoint" => self.endpoint.to_owned(),
+        )
+        .increment(self.count as u64);
         counter!(
-            "events_in_total", self.count as u64,
-            "uri" => self.uri.to_owned(),
-        );
-    }
-}
-
-#[derive(Debug)]
-pub struct NginxMetricsCollectCompleted {
-    pub start: Instant,
-    pub end: Instant,
-}
-
-impl InternalEvent for NginxMetricsCollectCompleted {
-    fn emit_logs(&self) {
-        debug!(message = "Collection completed.");
-    }
-
-    fn emit_metrics(&self) {
-        counter!("collect_completed_total", 1);
-        histogram!("collect_duration_seconds", self.end - self.start);
+            "component_received_event_bytes_total",
+            "endpoint" => self.endpoint.to_owned(),
+        )
+        .increment(self.byte_size.get() as u64);
     }
 }
 
@@ -64,54 +41,46 @@ pub struct NginxMetricsRequestError<'a> {
 }
 
 impl<'a> InternalEvent for NginxMetricsRequestError<'a> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         error!(
             message = "Nginx request error.",
             endpoint = %self.endpoint,
             error = %self.error,
-            error_type = "request_failed",
-            stage = "receiving",
+            error_type = error_type::REQUEST_FAILED,
+            stage = error_stage::RECEIVING,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
+            "component_errors_total",
             "endpoint" => self.endpoint.to_owned(),
-            "error" => self.error.to_string(),
-            "error_type" => "request_failed",
-            "stage" => "receiving",
-        );
-        // deprecated
-        counter!("http_request_errors_total", 1);
+            "error_type" => error_type::REQUEST_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }
 
-pub struct NginxMetricsStubStatusParseError<'a> {
+pub(crate) struct NginxMetricsStubStatusParseError<'a> {
     pub error: ParseError,
     pub endpoint: &'a str,
 }
 
 impl<'a> InternalEvent for NginxMetricsStubStatusParseError<'a> {
-    fn emit_logs(&self) {
+    fn emit(self) {
         error!(
             message = "NginxStubStatus parse error.",
             endpoint = %self.endpoint,
             error = %self.error,
-            error_type = "parse_failed",
-            stage = "processing",
+            error_type = error_type::PARSER_FAILED,
+            stage = error_stage::PROCESSING,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
+            "component_errors_total",
             "endpoint" => self.endpoint.to_owned(),
-            "error" => self.error.to_string(),
-            "error_type" => "parse_failed",
-            "stage" => "processing",
-        );
-        // deprecated
-        counter!("parse_errors_total", 1);
+            "error_type" => error_type::PARSER_FAILED,
+            "stage" => error_stage::PROCESSING,
+        )
+        .increment(1);
     }
 }

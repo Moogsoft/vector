@@ -1,46 +1,36 @@
-// ## skip check-events ##
-
-use std::net::IpAddr;
+use std::net::SocketAddr;
 
 use metrics::counter;
-use vector_core::internal_event::InternalEvent;
+use vector_lib::internal_event::{error_stage, error_type, InternalEvent};
 
-use crate::tls::TlsError;
+use crate::{internal_events::SocketOutgoingConnectionError, tls::TlsError};
 
 #[derive(Debug)]
 pub struct TcpSocketConnectionEstablished {
-    pub peer_addr: Option<std::net::SocketAddr>,
+    pub peer_addr: Option<SocketAddr>,
 }
 
 impl InternalEvent for TcpSocketConnectionEstablished {
-    fn emit_logs(&self) {
+    fn emit(self) {
         if let Some(peer_addr) = self.peer_addr {
             debug!(message = "Connected.", %peer_addr);
         } else {
             debug!(message = "Connected.", peer_addr = "unknown");
         }
-    }
-
-    fn emit_metrics(&self) {
-        counter!("connection_established_total", 1, "mode" => "tcp");
+        counter!("connection_established_total", "mode" => "tcp").increment(1);
     }
 }
 
 #[derive(Debug)]
-pub struct TcpSocketConnectionFailed<E> {
+pub struct TcpSocketOutgoingConnectionError<E> {
     pub error: E,
 }
 
-impl<E> InternalEvent for TcpSocketConnectionFailed<E>
-where
-    E: std::error::Error,
-{
-    fn emit_logs(&self) {
-        error!(message = "Unable to connect.", error = %self.error);
-    }
-
-    fn emit_metrics(&self) {
-        counter!("connection_failed_total", 1, "mode" => "tcp");
+impl<E: std::error::Error> InternalEvent for TcpSocketOutgoingConnectionError<E> {
+    fn emit(self) {
+        // ## skip check-duplicate-events ##
+        // ## skip check-validity-events ##
+        emit!(SocketOutgoingConnectionError { error: self.error });
     }
 }
 
@@ -48,55 +38,77 @@ where
 pub struct TcpSocketConnectionShutdown;
 
 impl InternalEvent for TcpSocketConnectionShutdown {
-    fn emit_logs(&self) {
-        debug!(message = "Received EOF from the server, shutdown.");
-    }
-
-    fn emit_metrics(&self) {
-        counter!("connection_shutdown_total", 1, "mode" => "tcp");
+    fn emit(self) {
+        warn!(message = "Received EOF from the server, shutdown.");
+        counter!("connection_shutdown_total", "mode" => "tcp").increment(1);
     }
 }
 
 #[derive(Debug)]
-pub struct TcpSocketConnectionError {
+pub struct TcpSocketError<'a, E> {
+    pub(crate) error: &'a E,
+    pub peer_addr: SocketAddr,
+}
+
+impl<E: std::fmt::Display> InternalEvent for TcpSocketError<'_, E> {
+    fn emit(self) {
+        error!(
+            message = "TCP socket error.",
+            error = %self.error,
+            peer_addr = ?self.peer_addr,
+            error_type = error_type::CONNECTION_FAILED,
+            stage = error_stage::PROCESSING,
+            internal_log_rate_limit = true,
+        );
+        counter!(
+            "component_errors_total",
+            "error_type" => error_type::CONNECTION_FAILED,
+            "stage" => error_stage::PROCESSING,
+        )
+        .increment(1);
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpSocketTlsConnectionError {
     pub error: TlsError,
 }
 
-impl InternalEvent for TcpSocketConnectionError {
-    fn emit_logs(&self) {
+impl InternalEvent for TcpSocketTlsConnectionError {
+    fn emit(self) {
         match self.error {
             // Specific error that occurs when the other side is only
             // doing SYN/SYN-ACK connections for healthcheck.
-            // https://github.com/timberio/vector/issues/7318
+            // https://github.com/vectordotdev/vector/issues/7318
             TlsError::Handshake { ref source }
                 if source.code() == openssl::ssl::ErrorCode::SYSCALL
                     && source.io_error().is_none() =>
             {
-                debug!(message = "Connection error, probably a healthcheck.", error = %self.error, internal_log_rate_secs = 10);
+                debug!(
+                    message = "Connection error, probably a healthcheck.",
+                    error = %self.error,
+                    internal_log_rate_limit = true,
+                );
             }
             _ => {
-                warn!(message = "Connection error.", error = %self.error, internal_log_rate_secs = 10)
+                error!(
+                    message = "Connection error.",
+                    error = %self.error,
+                    error_code = "connection_failed",
+                    error_type = error_type::WRITER_FAILED,
+                    stage = error_stage::SENDING,
+                    internal_log_rate_limit = true,
+                );
+                counter!(
+                    "component_errors_total",
+                    "error_code" => "connection_failed",
+                    "error_type" => error_type::WRITER_FAILED,
+                    "stage" => error_stage::SENDING,
+                    "mode" => "tcp",
+                )
+                .increment(1);
             }
         }
-    }
-
-    fn emit_metrics(&self) {
-        counter!("connection_errors_total", 1, "mode" => "tcp");
-    }
-}
-
-#[derive(Debug)]
-pub struct TcpSocketError {
-    pub error: std::io::Error,
-}
-
-impl InternalEvent for TcpSocketError {
-    fn emit_logs(&self) {
-        warn!(message = "TCP socket error.", error = %self.error);
-    }
-
-    fn emit_metrics(&self) {
-        counter!("connection_errors_total", 1, "mode" => "tcp");
     }
 }
 
@@ -106,31 +118,43 @@ pub struct TcpSendAckError {
 }
 
 impl InternalEvent for TcpSendAckError {
-    fn emit_logs(&self) {
-        warn!(message = "Error writing acknowledgement, dropping connection.", error = %self.error);
-    }
-
-    fn emit_metrics(&self) {
-        counter!("connection_send_ack_errors_total", 1, "mode" => "tcp");
+    fn emit(self) {
+        error!(
+            message = "Error writing acknowledgement, dropping connection.",
+            error = %self.error,
+            error_code = "ack_failed",
+            error_type = error_type::WRITER_FAILED,
+            stage = error_stage::SENDING,
+            internal_log_rate_limit = true,
+        );
+        counter!(
+            "component_errors_total",
+            "error_code" => "ack_failed",
+            "error_type" => error_type::WRITER_FAILED,
+            "stage" => error_stage::SENDING,
+            "mode" => "tcp",
+        )
+        .increment(1);
     }
 }
 
 #[derive(Debug)]
 pub struct TcpBytesReceived {
     pub byte_size: usize,
-    pub peer_addr: IpAddr,
+    pub peer_addr: SocketAddr,
 }
 
 impl InternalEvent for TcpBytesReceived {
-    fn emit_logs(&self) {
-        trace!(message = "Bytes received.", byte_size = %self.byte_size, peer_addr = %self.peer_addr);
-    }
-
-    fn emit_metrics(&self) {
-        counter!(
-            "component_received_bytes_total", self.byte_size as u64,
-            "protocol" => "tcp",
-            "peer_addr" => self.peer_addr.to_string()
+    fn emit(self) {
+        trace!(
+            message = "Bytes received.",
+            protocol = "tcp",
+            byte_size = %self.byte_size,
+            peer_addr = %self.peer_addr,
         );
+        counter!(
+            "component_received_bytes_total", "protocol" => "tcp"
+        )
+        .increment(self.byte_size as u64);
     }
 }

@@ -45,13 +45,16 @@ site_generation = 2
 
 # Search
 [params.search]
-algolia_app_id = "EOIG7V0A2O"
-# Note that it's okay to use this on the front end: https://www.algolia.com/doc/guides/security/api-keys/#search-only-api-key
-algolia_public_api_key = "5f712eef8e5dcf4ac4bbbd0099960626"
-
-algolia_index_prod = "vector_docs_prod"
-algolia_index_staging = "vector_docs_staging"
 algolia_autocomplete_theme = "classic"
+typesense_index = "vector_docs"
+
+# Note that it's okay to use this on the front end: https://typesense.com/docs/guide/security.html#public-api-key
+typesense_public_dev_apikey = "aTFLzhfCVeTj619Pxkhmz18798Nsau0Z"
+typesense_dev_host = "dnm1k9zrpctsvjowp"
+
+# Note that it's okay to use this on the front end: https://typesense.com/docs/guide/security.html#public-api-key
+typesense_public_prod_apikey = "BdepvpnczVgPL008lqhuBlkZo5s0rrWE"
+typesense_prod_host = "gk6e3zbyuntvc5dap"
 
 # VRL JSON server
 
@@ -143,8 +146,13 @@ weight = 5
 
 [[languages.en.menus.navbar]]
 name = "Support"
-url = "/support-services"
+url = "/community"
 weight = 6
+
+[[languages.en.menus.navbar]]
+name = "Observability Pipelines"
+url = "https://www.datadoghq.com/product/observability-pipelines"
+weight = 7
 
 # Footer menu
 [[languages.en.menus.footer]]
@@ -159,10 +167,28 @@ parent = "about"
 weight = 1
 
 [[languages.en.menus.footer]]
+name = "What is Observability Pipelines?"
+url = "/docs/about/what-is-observability-pipelines"
+parent = "about"
+weight = 2
+
+[[languages.en.menus.footer]]
 name = "Contact us"
 url = "/community"
 parent = "about"
-weight = 2
+weight = 3
+
+[[languages.en.menus.footer]]
+name = "Privacy"
+url = "https://www.datadoghq.com/legal/privacy/"
+parent = "about"
+weight = 4
+
+[[languages.en.menus.footer]]
+name = "Cookies"
+url = "https://www.datadoghq.com/legal/cookies/"
+parent = "about"
+weight = 5
 
 [[languages.en.menus.footer]]
 name = "Components"
@@ -219,6 +245,12 @@ parent = "setup"
 weight = 4
 
 [[languages.en.menus.footer]]
+name = "Going to Prod"
+url = "/docs/setup/going-to-prod"
+parent = "setup"
+weight = 5
+
+[[languages.en.menus.footer]]
 name = "Community"
 url = "/community"
 identifier = "community"
@@ -242,26 +274,33 @@ url = "https://chat.vector.dev"
 parent = "community"
 weight = 3
 
-# Extra links under the "Meta" section in the docs
-[[languages.en.menus.meta]]
-name = "Privacy"
-url = "https://github.com/vectordotdev/vector/blob/master/PRIVACY.md"
-weight = 1
+[[languages.en.menus.footer]]
+name = "Download"
+url = "/download"
+identifier = "download"
+weight = 5
 
+[[languages.en.menus.footer]]
+name = "Releases"
+url = "/releases"
+weight = 1
+parent = "download"
+
+# Extra links under the "Meta" section in the docs
 [[languages.en.menus.meta]]
 name = "Security"
 url = "https://github.com/vectordotdev/vector/security/policy"
-weight = 2
+weight = 1
 
 [[languages.en.menus.meta]]
 name = "Releases"
 url = "https://github.com/vectordotdev/vector/blob/master/RELEASES.md"
-weight = 3
+weight = 2
 
 [[languages.en.menus.meta]]
 name = "Versioning"
 url = "https://github.com/vectordotdev/vector/blob/master/VERSIONING.md"
-weight = 4
+weight = 3
 
 # Buttons in "community" section on main page
 [[languages.en.menus.community]]
@@ -302,13 +341,15 @@ params = { color = "rss-orange", icon = "rss" }
 url = "/blog/index.xml"
 weight = 4
 
-# Links in subfooter
-[[languages.en.menus.subfooter]]
-name = "Security policy"
-url = "https://github.com/vectordotdev/vector/blob/master/PRIVACY.md"
-weight = 1
+[security]
+  enableInlineShortcodes = false
+  [security.exec]
+    allow = ['^babel$', '^dart-sass-embedded$', '^go$', '^npx$', '^postcss$']
+    osEnv = ['(?i)^(PATH|PATHEXT|APPDATA|TMP|TEMP|TERM)$']
 
-[[languages.en.menus.subfooter]]
-name = "Privacy policy"
-url = "https://github.com/vectordotdev/vector/blob/master/PRIVACY.md"
-weight = 2
+  [security.funcs]
+    getenv = ['^HUGO_']
+
+  [security.http]
+    methods = ['(?i)GET|POST']
+    urls = ['.*']

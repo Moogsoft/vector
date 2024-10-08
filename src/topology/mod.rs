@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Topology contains all topology based types.
 //!
 //! Topology is broken up into two main sections. The first
@@ -6,8 +7,12 @@
 //! part contains config related items including config traits for
 //! each type of component.
 
+pub(super) use vector_lib::fanout;
+pub mod schema;
+
 pub mod builder;
-pub use vector_core::fanout;
+mod controller;
+mod ready_arrays;
 mod running;
 mod task;
 
@@ -15,82 +20,36 @@ mod task;
 mod test;
 
 use std::{
-    collections::HashMap,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
 
 use futures::{Future, FutureExt};
-pub use running::RunningTopology;
-use tokio::sync::{mpsc, watch};
-use vector_buffers::{
-    topology::channel::{BufferReceiver, BufferSender},
-    Acker,
-};
+use tokio::sync::mpsc;
+use vector_lib::buffers::topology::channel::{BufferReceiverStream, BufferSender};
 
+pub use self::builder::TopologyPieces;
+pub use self::controller::{ReloadOutcome, SharedTopologyController, TopologyController};
+pub use self::running::{RunningTopology, ShutdownErrorReceiver};
+
+use self::task::{Task, TaskError, TaskResult};
 use crate::{
-    config::{ComponentKey, Config, ConfigDiff, OutputId},
-    event::Event,
-    topology::{
-        builder::Pieces,
-        task::{Task, TaskOutput},
-    },
+    config::{ComponentKey, Config, ConfigDiff},
+    event::EventArray,
+    signal::ShutdownError,
 };
 
-type TaskHandle = tokio::task::JoinHandle<Result<TaskOutput, ()>>;
+type TaskHandle = tokio::task::JoinHandle<TaskResult>;
 
 type BuiltBuffer = (
-    BufferSender<Event>,
-    Arc<Mutex<Option<BufferReceiver<Event>>>>,
-    Acker,
+    BufferSender<EventArray>,
+    Arc<Mutex<Option<BufferReceiverStream<EventArray>>>>,
 );
 
-type Outputs = HashMap<OutputId, fanout::ControlChannel>;
-
-// Watcher types for topology changes. These are currently specific to receiving
-// `Outputs`. This could be expanded in the future to send an enum of types if,
-// for example, this included a new 'Inputs' type.
-type WatchTx = watch::Sender<Outputs>;
-pub type WatchRx = watch::Receiver<Outputs>;
-
-pub async fn start_validated(
-    config: Config,
-    diff: ConfigDiff,
-    mut pieces: Pieces,
-) -> Option<(RunningTopology, mpsc::UnboundedReceiver<()>)> {
-    let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-
-    let mut running_topology = RunningTopology::new(config, abort_tx);
-
-    if !running_topology
-        .run_healthchecks(&diff, &mut pieces, running_topology.config.healthchecks)
-        .await
-    {
-        return None;
-    }
-    running_topology.connect_diff(&diff, &mut pieces).await;
-    running_topology.spawn_diff(&diff, pieces);
-
-    Some((running_topology, abort_rx))
-}
-
-pub async fn build_or_log_errors(
-    config: &Config,
+pub(super) fn take_healthchecks(
     diff: &ConfigDiff,
-    buffers: HashMap<ComponentKey, BuiltBuffer>,
-) -> Option<Pieces> {
-    match builder::build_pieces(config, diff, buffers).await {
-        Err(errors) => {
-            for error in errors {
-                error!(message = "Configuration error.", %error);
-            }
-            None
-        }
-        Ok(new_pieces) => Some(new_pieces),
-    }
-}
-
-pub fn take_healthchecks(diff: &ConfigDiff, pieces: &mut Pieces) -> Vec<(ComponentKey, Task)> {
+    pieces: &mut TopologyPieces,
+) -> Vec<(ComponentKey, Task)> {
     (&diff.sinks.to_change | &diff.sinks.to_add)
         .into_iter()
         .filter_map(|id| pieces.healthchecks.remove(&id).map(move |task| (id, task)))
@@ -98,17 +57,19 @@ pub fn take_healthchecks(diff: &ConfigDiff, pieces: &mut Pieces) -> Vec<(Compone
 }
 
 async fn handle_errors(
-    task: impl Future<Output = Result<TaskOutput, ()>>,
-    abort_tx: mpsc::UnboundedSender<()>,
-) -> Result<TaskOutput, ()> {
+    task: impl Future<Output = TaskResult>,
+    abort_tx: mpsc::UnboundedSender<ShutdownError>,
+    error: impl FnOnce(String) -> ShutdownError,
+) -> TaskResult {
     AssertUnwindSafe(task)
         .catch_unwind()
         .await
-        .map_err(|_| ())
+        .map_err(|_| TaskError::Panicked)
         .and_then(|res| res)
-        .map_err(|_| {
-            error!("An error occurred that vector couldn't handle.");
-            let _ = abort_tx.send(());
+        .map_err(|e| {
+            error!("An error occurred that Vector couldn't handle: {}.", e);
+            _ = abort_tx.send(error(e.to_string()));
+            e
         })
 }
 
@@ -119,7 +80,7 @@ fn retain<T>(vec: &mut Vec<T>, mut retain_filter: impl FnMut(&mut T) -> bool) {
         if retain_filter(data) {
             i += 1;
         } else {
-            let _ = vec.remove(i);
+            _ = vec.remove(i);
         }
     }
 }

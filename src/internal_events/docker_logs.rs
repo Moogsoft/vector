@@ -1,45 +1,34 @@
-// ## skip check-events ##
-
 use bollard::errors::Error;
 use chrono::ParseError;
 use metrics::counter;
-use vector_core::internal_event::InternalEvent;
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::{
+    internal_event::{error_stage, error_type},
+    json_size::JsonSize,
+};
 
 #[derive(Debug)]
 pub struct DockerLogsEventsReceived<'a> {
-    pub byte_size: usize,
+    pub byte_size: JsonSize,
     pub container_id: &'a str,
     pub container_name: &'a str,
 }
 
-impl<'a> InternalEvent for DockerLogsEventsReceived<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsEventsReceived<'_> {
+    fn emit(self) {
         trace!(
-            message = "Received events.",
+            message = "Events received.",
             count = 1,
             byte_size = %self.byte_size,
             container_id = %self.container_id
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_received_events_total", 1,
-            "container_name" => self.container_name.to_owned()
-        );
+            "component_received_events_total", "container_name" => self.container_name.to_owned()
+        )
+        .increment(1);
         counter!(
-            "component_received_event_bytes_total", self.byte_size as u64,
-            "container_name" => self.container_name.to_owned()
-        );
-        // deprecated
-        counter!(
-            "events_in_total", 1,
-            "container_name" => self.container_name.to_owned()
-        );
-        counter!(
-            "processed_bytes_total", self.byte_size as u64,
-            "container_name" => self.container_name.to_owned()
-        );
+            "component_received_event_bytes_total", "container_name" => self.container_name.to_owned()
+        ).increment(self.byte_size.get() as u64);
     }
 }
 
@@ -49,17 +38,14 @@ pub struct DockerLogsContainerEventReceived<'a> {
     pub action: &'a str,
 }
 
-impl<'a> InternalEvent for DockerLogsContainerEventReceived<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsContainerEventReceived<'_> {
+    fn emit(self) {
         debug!(
             message = "Received one container event.",
             container_id = %self.container_id,
             action = %self.action,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("container_processed_events_total", 1);
+        counter!("container_processed_events_total").increment(1);
     }
 }
 
@@ -68,16 +54,13 @@ pub struct DockerLogsContainerWatch<'a> {
     pub container_id: &'a str,
 }
 
-impl<'a> InternalEvent for DockerLogsContainerWatch<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsContainerWatch<'_> {
+    fn emit(self) {
         info!(
             message = "Started watching for container logs.",
             container_id = %self.container_id,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("containers_watched_total", 1);
+        counter!("containers_watched_total").increment(1);
     }
 }
 
@@ -86,16 +69,13 @@ pub struct DockerLogsContainerUnwatch<'a> {
     pub container_id: &'a str,
 }
 
-impl<'a> InternalEvent for DockerLogsContainerUnwatch<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsContainerUnwatch<'_> {
+    fn emit(self) {
         info!(
             message = "Stopped watching for container logs.",
             container_id = %self.container_id,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("containers_unwatched_total", 1);
+        counter!("containers_unwatched_total").increment(1);
     }
 }
 
@@ -105,27 +85,22 @@ pub struct DockerLogsCommunicationError<'a> {
     pub container_id: Option<&'a str>,
 }
 
-impl<'a> InternalEvent for DockerLogsCommunicationError<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsCommunicationError<'_> {
+    fn emit(self) {
         error!(
             message = "Error in communication with Docker daemon.",
             error = ?self.error,
-            error_type = "connection_failed",
-            stage = "receiving",
+            error_type = error_type::CONNECTION_FAILED,
+            stage = error_stage::RECEIVING,
             container_id = ?self.container_id,
-            internal_log_rate_secs = 10
+            internal_log_rate_limit = true
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error" => self.error.to_string(),
-            "error_type" => "connection_failed",
-            "stage" => "receiving",
-        );
-        // deprecated
-        counter!("communication_errors_total", 1);
+            "component_errors_total",
+            "error_type" => error_type::CONNECTION_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }
 
@@ -135,28 +110,23 @@ pub struct DockerLogsContainerMetadataFetchError<'a> {
     pub container_id: &'a str,
 }
 
-impl<'a> InternalEvent for DockerLogsContainerMetadataFetchError<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsContainerMetadataFetchError<'_> {
+    fn emit(self) {
         error!(
             message = "Failed to fetch container metadata.",
             error = ?self.error,
-            error_type = "request_failed",
-            stage = "receiving",
+            error_type = error_type::REQUEST_FAILED,
+            stage = error_stage::RECEIVING,
             container_id = ?self.container_id,
-            internal_log_rate_secs = 10
+            internal_log_rate_limit = true
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error" => self.error.to_string(),
-            "error_type" => "request_failed",
-            "stage" => "receiving",
+            "component_errors_total",
+            "error_type" => error_type::REQUEST_FAILED,
+            "stage" => error_stage::RECEIVING,
             "container_id" => self.container_id.to_owned(),
-        );
-        // deprecated
-        counter!("container_metadata_fetch_errors_total", 1);
+        )
+        .increment(1);
     }
 }
 
@@ -166,28 +136,23 @@ pub struct DockerLogsTimestampParseError<'a> {
     pub container_id: &'a str,
 }
 
-impl<'a> InternalEvent for DockerLogsTimestampParseError<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsTimestampParseError<'_> {
+    fn emit(self) {
         error!(
             message = "Failed to parse timestamp as RFC3339 timestamp.",
             error = ?self.error,
-            error_type = "parser_failed",
-            stage = "processing",
+            error_type = error_type::PARSER_FAILED,
+            stage = error_stage::PROCESSING,
             container_id = ?self.container_id,
-            internal_log_rate_secs = 10
+            internal_log_rate_limit = true
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error" => self.error.to_string(),
-            "error_type" => "parser_failed",
-            "stage" => "processing",
+            "component_errors_total",
+            "error_type" => error_type::PARSER_FAILED,
+            "stage" => error_stage::PROCESSING,
             "container_id" => self.container_id.to_owned(),
-        );
-        // deprecated
-        counter!("timestamp_parse_errors_total", 1);
+        )
+        .increment(1);
     }
 }
 
@@ -197,29 +162,22 @@ pub struct DockerLogsLoggingDriverUnsupportedError<'a> {
     pub error: Error,
 }
 
-impl<'a> InternalEvent for DockerLogsLoggingDriverUnsupportedError<'a> {
-    fn emit_logs(&self) {
+impl InternalEvent for DockerLogsLoggingDriverUnsupportedError<'_> {
+    fn emit(self) {
         error!(
-            message = r#"
-                Docker engine is not using either the `jsonfile` or `journald`
-                logging driver. Please enable one of these logging drivers
-                to get logs from the Docker daemon."#,
+            message = "Docker engine is not using either the `jsonfile` or `journald` logging driver. Please enable one of these logging drivers to get logs from the Docker daemon.",
             error = ?self.error,
-            error_type = "configuration_failed",
-            stage = "receiving",
+            error_type = error_type::CONFIGURATION_FAILED,
+            stage = error_stage::RECEIVING,
             container_id = ?self.container_id,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error" => self.error.to_string(),
-            "error_type" => "configuration_failed",
-            "stage" => "receiving",
+            "component_errors_total",
+            "error_type" => error_type::CONFIGURATION_FAILED,
+            "stage" => error_stage::RECEIVING,
             "container_id" => self.container_id.to_owned(),
-        );
-        // deprecated
-        counter!("logging_driver_errors_total", 1);
+        )
+        .increment(1);
     }
 }

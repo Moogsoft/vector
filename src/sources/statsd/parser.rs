@@ -1,118 +1,127 @@
 use std::{
-    collections::BTreeMap,
     error, fmt,
     num::{ParseFloatError, ParseIntError},
     str::Utf8Error,
 };
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::event::metric::{Metric, MetricKind, MetricValue, StatisticKind};
+use crate::{
+    event::metric::{Metric, MetricKind, MetricTags, MetricValue, StatisticKind},
+    sources::util::extract_tag_key_and_value,
+};
 
-lazy_static! {
-    static ref WHITESPACE: Regex = Regex::new(r"\s+").unwrap();
-    static ref NONALPHANUM: Regex = Regex::new(r"[^a-zA-Z_\-0-9\.]").unwrap();
+static WHITESPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
+static NONALPHANUM: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-zA-Z_\-0-9\.]").unwrap());
+
+#[derive(Clone)]
+pub struct Parser {
+    sanitize: bool,
 }
 
-pub fn parse(packet: &str) -> Result<Metric, ParseError> {
-    // https://docs.datadoghq.com/developers/dogstatsd/datagram_shell/#datagram-format
-    let key_and_body = packet.splitn(2, ':').collect::<Vec<_>>();
-    if key_and_body.len() != 2 {
-        return Err(ParseError::Malformed(
-            "should be key and body with ':' separator",
-        ));
-    }
-    let (key, body) = (key_and_body[0], key_and_body[1]);
-
-    let parts = body.split('|').collect::<Vec<_>>();
-    if parts.len() < 2 {
-        return Err(ParseError::Malformed(
-            "body should have at least two pipe separated components",
-        ));
-    }
-
-    let name = sanitize_key(key);
-    let metric_type = parts[1];
-
-    // sampling part is optional and comes after metric type part
-    let sampling = parts.get(2).filter(|s| s.starts_with('@'));
-    let sample_rate = if let Some(s) = sampling {
-        1.0 / sanitize_sampling(parse_sampling(s)?)
-    } else {
-        1.0
-    };
-
-    // tags are optional and could be found either after sampling of after metric type part
-    let tags = if sampling.is_none() {
-        parts.get(2)
-    } else {
-        parts.get(3)
-    };
-    let tags = tags.filter(|s| s.starts_with('#'));
-    let tags = if let Some(t) = tags {
-        Some(parse_tags(t)?)
-    } else {
-        None
-    };
-
-    let metric = match metric_type {
-        "c" => {
-            let val: f64 = parts[0].parse()?;
-            Metric::new(
-                name,
-                MetricKind::Incremental,
-                MetricValue::Counter {
-                    value: val * sample_rate,
-                },
-            )
-            .with_tags(tags)
+impl Parser {
+    pub const fn new(sanitize_keys: bool) -> Self {
+        Self {
+            sanitize: sanitize_keys,
         }
-        unit @ "h" | unit @ "ms" | unit @ "d" => {
-            let val: f64 = parts[0].parse()?;
-            Metric::new(
+    }
+
+    pub fn parse(&self, packet: &str) -> Result<Metric, ParseError> {
+        // https://docs.datadoghq.com/developers/dogstatsd/datagram_shell/#datagram-format
+        let key_and_body = packet.splitn(2, ':').collect::<Vec<_>>();
+        if key_and_body.len() != 2 {
+            return Err(ParseError::Malformed(
+                "should be key and body with ':' separator",
+            ));
+        }
+        let (key, body) = (key_and_body[0], key_and_body[1]);
+
+        let parts = body.split('|').collect::<Vec<_>>();
+        if parts.len() < 2 {
+            return Err(ParseError::Malformed(
+                "body should have at least two pipe separated components",
+            ));
+        }
+
+        let name = sanitize_key(key, self.sanitize);
+        let metric_type = parts[1];
+
+        // sampling part is optional and comes after metric type part
+        let sampling = parts.get(2).filter(|s| s.starts_with('@'));
+        let sample_rate = if let Some(s) = sampling {
+            1.0 / sanitize_sampling(parse_sampling(s)?)
+        } else {
+            1.0
+        };
+
+        // tags are optional and could be found either after sampling of after metric type part
+        let tags = if sampling.is_none() {
+            parts.get(2)
+        } else {
+            parts.get(3)
+        };
+        let tags = tags.filter(|s| s.starts_with('#'));
+        let tags = tags.map(parse_tags).transpose()?;
+
+        let metric = match metric_type {
+            "c" => {
+                let val: f64 = parts[0].parse()?;
+                Metric::new(
+                    name,
+                    MetricKind::Incremental,
+                    MetricValue::Counter {
+                        value: val * sample_rate,
+                    },
+                )
+                .with_tags(tags)
+            }
+            unit @ "h" | unit @ "ms" | unit @ "d" => {
+                let val: f64 = parts[0].parse()?;
+                Metric::new(
                 name, MetricKind::Incremental, MetricValue::Distribution {
-                    samples: vector_core::samples![convert_to_base_units(unit, val) => sample_rate as u32],
+                    samples: vector_lib::samples![convert_to_base_units(unit, val) => sample_rate as u32],
                     statistic: convert_to_statistic(unit),
                 },
             ).with_tags(tags)
-        }
-        "g" => {
-            let value = if parts[0]
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_digit())
-                .ok_or(ParseError::Malformed("empty first body component"))?
-            {
-                parts[0].parse()?
-            } else {
-                parts[0][1..].parse()?
-            };
-
-            match parse_direction(parts[0])? {
-                None => Metric::new(name, MetricKind::Absolute, MetricValue::Gauge { value })
-                    .with_tags(tags),
-                Some(sign) => Metric::new(
-                    name,
-                    MetricKind::Incremental,
-                    MetricValue::Gauge {
-                        value: value * sign,
-                    },
-                )
-                .with_tags(tags),
             }
-        }
-        "s" => Metric::new(
-            name,
-            MetricKind::Incremental,
-            MetricValue::Set {
-                values: vec![parts[0].into()].into_iter().collect(),
-            },
-        )
-        .with_tags(tags),
-        other => return Err(ParseError::UnknownMetricType(other.into())),
-    };
-    Ok(metric)
+            "g" => {
+                let value = if parts[0]
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .ok_or(ParseError::Malformed("empty first body component"))?
+                {
+                    parts[0].parse()?
+                } else {
+                    parts[0][1..].parse()?
+                };
+
+                match parse_direction(parts[0])? {
+                    None => Metric::new(name, MetricKind::Absolute, MetricValue::Gauge { value })
+                        .with_tags(tags),
+                    Some(sign) => Metric::new(
+                        name,
+                        MetricKind::Incremental,
+                        MetricValue::Gauge {
+                            value: value * sign,
+                        },
+                    )
+                    .with_tags(tags),
+                }
+            }
+            "s" => Metric::new(
+                name,
+                MetricKind::Incremental,
+                MetricValue::Set {
+                    values: vec![parts[0].into()].into_iter().collect(),
+                },
+            )
+            .with_tags(tags),
+            other => return Err(ParseError::UnknownMetricType(other.into())),
+        };
+        Ok(metric)
+    }
 }
 
 fn parse_sampling(input: &str) -> Result<f64, ParseError> {
@@ -130,27 +139,18 @@ fn parse_sampling(input: &str) -> Result<f64, ParseError> {
     }
 }
 
-fn parse_tags(input: &str) -> Result<BTreeMap<String, String>, ParseError> {
+/// Statsd (and dogstatsd) support bare, single and multi-value tags.
+fn parse_tags(input: &&str) -> Result<MetricTags, ParseError> {
     if !input.starts_with('#') || input.len() < 2 {
         return Err(ParseError::Malformed(
             "expected non empty '#'-prefixed tags component",
         ));
     }
 
-    let mut result = BTreeMap::new();
-
-    let chunks = input[1..].split(',').collect::<Vec<_>>();
-    for chunk in chunks {
-        let pair: Vec<_> = chunk.split(':').collect();
-        let key = &pair[0];
-        // same as in telegraf plugin:
-        // if tag value is not provided, use "true"
-        // https://github.com/influxdata/telegraf/blob/master/plugins/inputs/statsd/datadog.go#L152
-        let value = pair.get(1).unwrap_or(&"true");
-        result.insert((*key).to_owned(), (*value).to_owned());
-    }
-
-    Ok(result)
+    Ok(input[1..]
+        .split(',')
+        .map(extract_tag_key_and_value)
+        .collect())
 }
 
 fn parse_direction(input: &str) -> Result<Option<f64>, ParseError> {
@@ -166,11 +166,15 @@ fn parse_direction(input: &str) -> Result<Option<f64>, ParseError> {
     }
 }
 
-fn sanitize_key(key: &str) -> String {
-    let s = key.replace("/", "-");
-    let s = WHITESPACE.replace_all(&s, "_");
-    let s = NONALPHANUM.replace_all(&s, "");
-    s.into()
+fn sanitize_key(key: &str, sanitize: bool) -> String {
+    if !sanitize {
+        key.to_owned()
+    } else {
+        let s = key.replace('/', "'-");
+        let s = WHITESPACE.replace_all(&s, "_");
+        let s = NONALPHANUM.replace_all(&s, "");
+        s.into()
+    }
 }
 
 fn sanitize_sampling(sampling: f64) -> f64 {
@@ -195,7 +199,7 @@ fn convert_to_statistic(unit: &str) -> StatisticKind {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
     InvalidUtf8(Utf8Error),
     Malformed(&'static str),
@@ -210,7 +214,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-vector_common::impl_event_data_eq!(ParseError);
+vector_lib::impl_event_data_eq!(ParseError);
 
 impl error::Error for ParseError {}
 
@@ -228,10 +232,21 @@ impl From<ParseFloatError> for ParseError {
 
 #[cfg(test)]
 mod test {
-    use vector_common::assert_event_data_eq;
+    use vector_lib::assert_event_data_eq;
+    use vector_lib::{event::metric::TagValue, metric_tags};
 
-    use super::{parse, sanitize_key, sanitize_sampling};
+    use super::{sanitize_key, sanitize_sampling, ParseError, Parser};
     use crate::event::metric::{Metric, MetricKind, MetricValue, StatisticKind};
+
+    const SANITIZING_PARSER: Parser = Parser::new(true);
+    fn parse(packet: &str) -> Result<Metric, ParseError> {
+        SANITIZING_PARSER.parse(packet)
+    }
+
+    const NON_SANITIZING_PARSER: Parser = Parser::new(false);
+    fn unsanitized_parse(packet: &str) -> Result<Metric, ParseError> {
+        NON_SANITIZING_PARSER.parse(packet)
+    }
 
     #[test]
     fn basic_counter() {
@@ -248,20 +263,52 @@ mod test {
     #[test]
     fn tagged_counter() {
         assert_event_data_eq!(
-            parse("foo:1|c|#tag1,tag2:value"),
+            parse("foo/how@ever baz:1|c|#tag1,tag2:value"),
+            Ok(Metric::new(
+                "foo-however_baz",
+                MetricKind::Incremental,
+                MetricValue::Counter { value: 1.0 },
+            )
+            .with_tags(Some(metric_tags!(
+                "tag1" => TagValue::Bare,
+                "tag2" => "value",
+            )))),
+        );
+    }
+
+    #[test]
+    fn tagged_not_sanitized_counter() {
+        assert_event_data_eq!(
+            unsanitized_parse("foo/bar@baz baz:1|c|#tag1,tag2:value"),
+            Ok(Metric::new(
+                "foo/bar@baz baz",
+                MetricKind::Incremental,
+                MetricValue::Counter { value: 1.0 },
+            )
+            .with_tags(Some(metric_tags!(
+                "tag1" => TagValue::Bare,
+                "tag2" => "value",
+            )))),
+        );
+    }
+
+    #[test]
+    fn enhanced_tags() {
+        assert_event_data_eq!(
+            parse("foo:1|c|#tag1,tag2:valueA,tag2:valueB,tag3:value,tag3,tag4:"),
             Ok(Metric::new(
                 "foo",
                 MetricKind::Incremental,
                 MetricValue::Counter { value: 1.0 },
             )
-            .with_tags(Some(
-                vec![
-                    ("tag1".to_owned(), "true".to_owned()),
-                    ("tag2".to_owned(), "value".to_owned()),
-                ]
-                .into_iter()
-                .collect(),
-            ))),
+            .with_tags(Some(metric_tags!(
+                "tag1" => TagValue::Bare,
+                "tag2" => "valueA",
+                "tag2" => "valueB",
+                "tag3" => "value",
+                "tag3" => TagValue::Bare,
+                "tag4" => "",
+            )))),
         );
     }
 
@@ -297,7 +344,7 @@ mod test {
                 "glork",
                 MetricKind::Incremental,
                 MetricValue::Distribution {
-                    samples: vector_core::samples![0.320 => 10],
+                    samples: vector_lib::samples![0.320 => 10],
                     statistic: StatisticKind::Histogram
                 },
             )),
@@ -312,19 +359,15 @@ mod test {
                 "glork",
                 MetricKind::Incremental,
                 MetricValue::Distribution {
-                    samples: vector_core::samples![320.0 => 10],
+                    samples: vector_lib::samples![320.0 => 10],
                     statistic: StatisticKind::Histogram
                 },
             )
-            .with_tags(Some(
-                vec![
-                    ("region".to_owned(), "us-west1".to_owned()),
-                    ("production".to_owned(), "true".to_owned()),
-                    ("e".to_owned(), "".to_owned()),
-                ]
-                .into_iter()
-                .collect(),
-            ))),
+            .with_tags(Some(metric_tags!(
+                "region" => "us-west1",
+                "production" => TagValue::Bare,
+                "e" => "",
+            )))),
         );
     }
 
@@ -336,19 +379,15 @@ mod test {
                 "glork",
                 MetricKind::Incremental,
                 MetricValue::Distribution {
-                    samples: vector_core::samples![320.0 => 10],
+                    samples: vector_lib::samples![320.0 => 10],
                     statistic: StatisticKind::Summary
                 },
             )
-            .with_tags(Some(
-                vec![
-                    ("region".to_owned(), "us-west1".to_owned()),
-                    ("production".to_owned(), "true".to_owned()),
-                    ("e".to_owned(), "".to_owned()),
-                ]
-                .into_iter()
-                .collect(),
-            ))),
+            .with_tags(Some(metric_tags!(
+                "region" => "us-west1",
+                "production" => TagValue::Bare,
+                "e" => "",
+            )))),
         );
     }
 
@@ -400,9 +439,14 @@ mod test {
 
     #[test]
     fn sanitizing_keys() {
-        assert_eq!("foo-bar-baz", sanitize_key("foo/bar/baz"));
-        assert_eq!("foo_bar_baz", sanitize_key("foo bar  baz"));
-        assert_eq!("foo.__bar_.baz", sanitize_key("foo. @& bar_$!#.baz"));
+        assert_eq!("foo-bar-baz", sanitize_key("foo/bar/baz", true));
+        assert_eq!("foo/bar/baz", sanitize_key("foo/bar/baz", false));
+        assert_eq!("foo_bar_baz", sanitize_key("foo bar  baz", true));
+        assert_eq!("foo.__bar_.baz", sanitize_key("foo. @& bar_$!#.baz", true));
+        assert_eq!(
+            "foo. @& bar_$!#.baz",
+            sanitize_key("foo. @& bar_$!#.baz", false)
+        );
     }
 
     #[test]

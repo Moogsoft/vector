@@ -32,6 +32,10 @@ The `master` branch, on the other hand, often contains unreleased, "nightly" cha
 
 vector.dev is built using the [Hugo] static site generator. The site configuration is in [`config.toml`](./config.toml). The standard Hugo [directory structure] is obeyed.
 
+### Cargo data
+
+Some pages in the Vector documentation rely on dependency information such as version numbers found in the [`../Cargo.lock`](../Cargo.lock) file. Whenever you build the Vector site, the `../Cargo.lock` file is copied into `data/cargo-lock.toml` so it can be used in conjunction with Hugo's templating system to build HTML.
+
 ### Structured data
 
 The Vector documentation relies heavily on structured data supplied using the [CUE] configuration and data validation language. Uses of CUE data include the docs for Vector's many [components] and the docs for [Vector Remap Language][vrl].
@@ -39,6 +43,8 @@ The Vector documentation relies heavily on structured data supplied using the [C
 All of the CUE sources for the site are in the [`cue`](./cue) directory. Whenever you build the Vector site, the CUE sources are compiled into a single JSON file that's stored at `data/docs.json`. That information is then used in conjunction with Hugo's templating system to build HTML.
 
 There's a variety of helper commands available for working with CUE. Run `make cue-help` for CLI docs.
+
+> Having trouble with CUE? See [CUE pro tips](#cue-pro-tips) below for some pointers.
 
 ### JavaScript
 
@@ -65,14 +71,13 @@ In addition to Tailwind classes, some CSS is built from [Sass] (all Sass files a
 
 ### Search
 
-Search for vector.dev is provided by [Algolia]. Our search solution is largely custom:
+Search for vector.dev is provided by [Typesense]. Our search solution is largely custom:
 
-* The [`algolia-index.ts`](./scripts/algolia-index.ts) script indexes all of the relevant pages on the site and stores the entire index in a single JSON file (output to `public/search.json`).
-* The [`atomic-algolia`][atomic-algolia] tool syncs the generated JSON index with the Algolia backend, performing all the necessary create, update, and delete operations.
+* The [`typesense-index.ts`](./scripts/typesense-index.ts) script generates an index of all of the relevant pages on the site and stores the result in a single JSON file (output to `public/search.json`).
+* The [`typesense-sync.ts`](./scripts/typesense-sync.ts) script syncs the generated JSON index with the Typesense backend, performing all the necessary create, update, and delete operations, using a custom package, `typesense-sync`. Reach out in #websites for more details.
 
-The Algolia configuration for the site is controlled via the [`algolia.json`](./algolia.json) file. The Algolia CLI syncs this config with the Algolia API.
+The Typesense configuration for the site is captured via the [`typesense.config.json`](./typesense.config.json) file.
 
-> Everything needed to configure Algolia search for vector.dev is in this repo; you should never make manual configuration changes through the Algolia dashboard.
 
 #### De-indexing pages
 
@@ -153,14 +158,57 @@ When you make changes to the Markdown sources, Sass/CSS, or JavaScript, the site
 
     The `title` should reflect the version, while the `weight` should be the weight of the next most recent version plus 1. The file for version 0.8.1, for example, has a weight of 8, which means the weight for version 0.8.2 (the next higher version) is 9. This metadata is necessary because Hugo can't sort semantic versions, so we need to make the ordering explicit. If Hugo ever does allow for semver sorting, we should remove the `weight`s.
 
+## Lighthouse scores
+
+[Lighthouse] scores for the website are produced automatically by [Netlify's Lighthouse plugin][plugin]. Those reports are available at `${ROOT}/reports/lighthouse`, where `ROOT` is the root URL for a version of the site. Thus, reports for the production version of the site would be available at https://vector.dev/reports/lighthouse. Reports are also generated for deploy previews and branch deploys.
+
 ## Known issues
 
 * Tailwind's [typography] plugin is used to render text throughout the site. It's a decent library in general but is also rather buggy, with some rendering glitches in things like lists and tables that we've tried to compensate for in the `extend.typography` block in the [Tailwind config](./tailwind.config.js), but it will take some time to iron all of these issues out.
 
-[algolia]: https://algolia.com
+## CUE pro tips
+
+[CUE] can be tricky, tripping up even the most seasoned veterans of the language. Below are some tips that might help you get over the hump with whatever CUE logic you're trying to add to the Vector docs.
+
+### One step at a time
+
+We generally advise writing CUE in an incremental way. If you add a lot of new CUE logic and _then_ validate what you've added, the likelihood of encountering inscrutable errors and having little insight into where specifically you went wrong is quite high. Instead, add and then validate little bits at a time. Tools like [`watchexec`][watchexec] can help with this. Here's an example command (run here in the `website` directory):
+
+```shell
+watchexec "make cue-build"
+```
+
+This runs the CUE build every time you save a change to your CUE sources. The feedback loop is typically 2-5 seconds.
+
+### Watch your indentation
+
+Good:
+
+```cue
+description: """
+    Here is a long string...
+    """
+```
+
+Bad:
+
+```cue
+description: """
+        Here is a long string...
+    """
+```
+
+Also bad:
+
+```cue
+description: """
+    Here is a long string...
+        """
+```
+
+[typesense]: https://typesense.org
 [aliases]: https://gohugo.io/content-management/urls
 [alpine]: https://alpinejs.dev
-[atomic-algolia]: https://github.com/chrisdmacrae/atomic-algolia
 [components]: https://vector.dev/components
 [cue]: https://cuelang.org
 [deploy previews]: https://docs.netlify.com/site-deploys/deploy-previews
@@ -172,9 +220,11 @@ When you make changes to the Markdown sources, Sass/CSS, or JavaScript, the site
 [hugo]: https://gohugo.io
 [hugo pipes]: https://gohugo.io/hugo-pipes
 [ionicons]: https://ionic.io/ionicons
+[lighthouse]: https://web.dev/performance-scoring
 [netlify]: https://netlify.com
 [netlify_project]: https://app.netlify.com/sites/vector-project/overview
 [node.js]: https://nodejs.org
+[plugin]: https://www.npmjs.com/package/@netlify/plugin-lighthouse
 [postcss]: https://github.com/postcss/postcss
 [purgecss]: https://purgecss.com
 [react.js]: https://reactjs.org
@@ -187,4 +237,5 @@ When you make changes to the Markdown sources, Sass/CSS, or JavaScript, the site
 [typography]: https://github.com/tailwindlabs/tailwindcss-typography
 [vector]: https://vector.dev
 [vrl]: https://vrl.dev
+[watchexec]: https://github.com/watchexec/watchexec
 [yarn]: https://yarnpkg.com

@@ -1,7 +1,8 @@
-// ## skip check-events ##
-
 use metrics::counter;
-use vector_core::internal_event::InternalEvent;
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::internal_event::{error_stage, error_type};
+
+use super::prelude::io_error_code;
 
 #[derive(Debug)]
 pub struct HerokuLogplexRequestReceived<'a> {
@@ -11,18 +12,14 @@ pub struct HerokuLogplexRequestReceived<'a> {
 }
 
 impl<'a> InternalEvent for HerokuLogplexRequestReceived<'a> {
-    fn emit_logs(&self) {
-        info!(
+    fn emit(self) {
+        debug!(
             message = "Handling logplex request.",
             msg_count = %self.msg_count,
             frame_id = %self.frame_id,
             drain_token = %self.drain_token,
-            internal_log_rate_secs = 10
+            internal_log_rate_limit = true
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("requests_received_total", 1);
     }
 }
 
@@ -32,15 +29,21 @@ pub struct HerokuLogplexRequestReadError {
 }
 
 impl InternalEvent for HerokuLogplexRequestReadError {
-    fn emit_logs(&self) {
+    fn emit(self) {
         error!(
             message = "Error reading request body.",
             error = ?self.error,
-            internal_log_rate_secs = 10
+            error_type = error_type::READER_FAILED,
+            error_code = io_error_code(&self.error),
+            stage = error_stage::PROCESSING,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
-        counter!("request_read_errors_total", 1);
+        counter!(
+            "component_errors_total",
+            "error_type" => error_type::READER_FAILED,
+            "error_code" => io_error_code(&self.error),
+            "stage" => error_stage::PROCESSING,
+        )
+        .increment(1);
     }
 }

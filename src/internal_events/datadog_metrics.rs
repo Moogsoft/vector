@@ -1,33 +1,37 @@
-// ## skip check-events ##
 use metrics::counter;
-use vector_core::internal_event::InternalEvent;
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::internal_event::{error_stage, error_type, ComponentEventsDropped, UNINTENTIONAL};
 
 #[derive(Debug)]
-pub struct DatadogMetricsEncodingError {
-    pub error: &'static str,
-    pub dropped_events: u64,
+pub struct DatadogMetricsEncodingError<'a> {
+    pub reason: &'a str,
+    pub error_code: &'static str,
+    pub dropped_events: usize,
 }
 
-impl InternalEvent for DatadogMetricsEncodingError {
-    fn emit_logs(&self) {
+impl<'a> InternalEvent for DatadogMetricsEncodingError<'a> {
+    fn emit(self) {
         error!(
-            message = "Failed to encode Datadog metrics.",
-            error_type = "encode_failed",
-            error = %self.error,
-            stage = "processing"
+            message = self.reason,
+            error_code = self.error_code,
+            error_type = error_type::ENCODER_FAILED,
+            intentional = "false",
+            stage = error_stage::PROCESSING,
+            internal_log_rate_limit = true,
         );
-    }
-
-    fn emit_metrics(&self) {
         counter!(
-            "component_errors_total", 1,
-            "error_type" => "encode_failed",
-            "error" => self.error,
-            "stage" => "processing",
-        );
+            "component_errors_total",
+            "error_code" => self.error_code,
+            "error_type" => error_type::ENCODER_FAILED,
+            "stage" => error_stage::PROCESSING,
+        )
+        .increment(1);
 
         if self.dropped_events > 0 {
-            counter!("component_discarded_events_total", self.dropped_events);
+            emit!(ComponentEventsDropped::<UNINTENTIONAL> {
+                count: self.dropped_events,
+                reason: self.reason,
+            });
         }
     }
 }

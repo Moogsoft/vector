@@ -1,82 +1,154 @@
-use std::task::Poll;
-
-use bytes::Bytes;
 use chrono::Utc;
 use fakedata::logs::*;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use rand::seq::SliceRandom;
-use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use snafu::Snafu;
+use std::task::Poll;
 use tokio::time::{self, Duration};
 use tokio_util::codec::FramedRead;
-use vector_core::ByteSizeOf;
+use vector_lib::codecs::{
+    decoding::{DeserializerConfig, FramingConfig},
+    StreamDecodingError,
+};
+use vector_lib::configurable::configurable_component;
+use vector_lib::internal_event::{
+    ByteSize, BytesReceived, CountByteSize, InternalEventHandle as _, Protocol,
+};
+use vector_lib::lookup::{owned_value_path, path};
+use vector_lib::{
+    config::{LegacyKey, LogNamespace},
+    EstimatedJsonEncodedSizeOf,
+};
+use vrl::value::Kind;
 
 use crate::{
-    codecs::{
-        self,
-        decoding::{DecodingConfig, DeserializerConfig, FramingConfig},
-    },
-    config::{log_schema, DataType, Output, SourceConfig, SourceContext, SourceDescription},
-    internal_events::{BytesReceived, DemoLogsEventProcessed, EventsReceived, StreamClosedError},
+    codecs::{Decoder, DecodingConfig},
+    config::{SourceConfig, SourceContext, SourceOutput},
+    internal_events::{DemoLogsEventProcessed, EventsReceived, StreamClosedError},
     serde::{default_decoding, default_framing_message_based},
     shutdown::ShutdownSignal,
-    sources::util::StreamDecodingError,
     SourceSender,
 };
 
-#[derive(Clone, Debug, Derivative, Deserialize, Serialize)]
+/// Configuration for the `demo_logs` source.
+#[serde_as]
+#[configurable_component(source(
+    "demo_logs",
+    "Generate fake log events, which can be useful for testing and demos."
+))]
+#[derive(Clone, Debug, Derivative)]
 #[derivative(Default)]
-#[serde(default)]
 pub struct DemoLogsConfig {
+    /// The amount of time, in seconds, to pause between each batch of output lines.
+    ///
+    /// The default is one batch per second. To remove the delay and output batches as quickly as possible, set
+    /// `interval` to `0.0`.
     #[serde(alias = "batch_interval")]
     #[derivative(Default(value = "default_interval()"))]
-    pub interval: f64,
+    #[serde(default = "default_interval")]
+    #[configurable(metadata(docs::examples = 1.0, docs::examples = 0.1, docs::examples = 0.01,))]
+    #[serde_as(as = "serde_with::DurationSecondsWithFrac<f64>")]
+    pub interval: Duration,
+
+    /// The total number of lines to output.
+    ///
+    /// By default, the source continuously prints logs (infinitely).
     #[derivative(Default(value = "default_count()"))]
+    #[serde(default = "default_count")]
     pub count: usize,
+
     #[serde(flatten)]
+    #[configurable(metadata(
+        docs::enum_tag_description = "The format of the randomly generated output."
+    ))]
     pub format: OutputFormat,
+
+    #[configurable(derived)]
     #[derivative(Default(value = "default_framing_message_based()"))]
+    #[serde(default = "default_framing_message_based")]
     pub framing: FramingConfig,
+
+    #[configurable(derived)]
     #[derivative(Default(value = "default_decoding()"))]
+    #[serde(default = "default_decoding")]
     pub decoding: DeserializerConfig,
+
+    /// The namespace to use for logs. This overrides the global setting.
+    #[serde(default)]
+    #[configurable(metadata(docs::hidden))]
+    pub log_namespace: Option<bool>,
 }
 
-const fn default_interval() -> f64 {
-    1.0
+const fn default_interval() -> Duration {
+    Duration::from_secs(1)
 }
 
 const fn default_count() -> usize {
     isize::MAX as usize
 }
 
-#[derive(Debug, PartialEq, Snafu)]
+#[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum DemoLogsConfigError {
     #[snafu(display("A non-empty list of lines is required for the shuffle format"))]
     ShuffleDemoLogsItemsEmpty,
 }
 
-#[derive(Clone, Debug, Derivative, Deserialize, Serialize)]
+/// Output format configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Derivative)]
 #[derivative(Default)]
 #[serde(tag = "format", rename_all = "snake_case")]
+#[configurable(metadata(
+    docs::enum_tag_description = "The format of the randomly generated output."
+))]
 pub enum OutputFormat {
+    /// Lines are chosen at random from the list specified using `lines`.
     Shuffle {
+        /// If `true`, each output line starts with an increasing sequence number, beginning with 0.
         #[serde(default)]
         sequence: bool,
+        /// The list of lines to output.
+        #[configurable(metadata(docs::examples = "lines_example()"))]
         lines: Vec<String>,
     },
+
+    /// Randomly generated logs in [Apache common][apache_common] format.
+    ///
+    /// [apache_common]: https://httpd.apache.org/docs/current/logs.html#common
     ApacheCommon,
+
+    /// Randomly generated logs in [Apache error][apache_error] format.
+    ///
+    /// [apache_error]: https://httpd.apache.org/docs/current/logs.html#errorlog
     ApacheError,
+
+    /// Randomly generated logs in Syslog format ([RFC 5424][syslog_5424]).
+    ///
+    /// [syslog_5424]: https://tools.ietf.org/html/rfc5424
     #[serde(alias = "rfc5424")]
     Syslog,
+
+    /// Randomly generated logs in Syslog format ([RFC 3164][syslog_3164]).
+    ///
+    /// [syslog_3164]: https://tools.ietf.org/html/rfc3164
     #[serde(alias = "rfc3164")]
     BsdSyslog,
+
+    /// Randomly generated HTTP server logs in [JSON][json] format.
+    ///
+    /// [json]: https://en.wikipedia.org/wiki/JSON
     #[derivative(Default)]
     Json,
 }
 
+const fn lines_example() -> [&'static str; 2] {
+    ["line1", "line2"]
+}
+
 impl OutputFormat {
     fn generate_line(&self, n: usize) -> String {
-        emit!(&DemoLogsEventProcessed);
+        emit!(DemoLogsEventProcessed);
 
         match self {
             Self::Shuffle {
@@ -118,8 +190,13 @@ impl OutputFormat {
 }
 
 impl DemoLogsConfig {
-    #[allow(dead_code)] // to make check-component-features pass
-    pub fn repeat(lines: Vec<String>, count: usize, interval: f64) -> Self {
+    #[cfg(test)]
+    pub fn repeat(
+        lines: Vec<String>,
+        count: usize,
+        interval: Duration,
+        log_namespace: Option<bool>,
+    ) -> Self {
         Self {
             count,
             interval,
@@ -129,25 +206,25 @@ impl DemoLogsConfig {
             },
             framing: default_framing_message_based(),
             decoding: default_decoding(),
+            log_namespace,
         }
     }
 }
 
 async fn demo_logs_source(
-    interval: f64,
+    interval: Duration,
     count: usize,
     format: OutputFormat,
-    decoder: codecs::Decoder,
+    decoder: Decoder,
     mut shutdown: ShutdownSignal,
     mut out: SourceSender,
+    log_namespace: LogNamespace,
 ) -> Result<(), ()> {
-    let maybe_interval: Option<f64> = if interval != 0.0 {
-        Some(interval)
-    } else {
-        None
-    };
+    let interval: Option<Duration> = (interval != Duration::ZERO).then_some(interval);
+    let mut interval = interval.map(time::interval);
 
-    let mut interval = maybe_interval.map(|i| time::interval(Duration::from_secs_f64(i)));
+    let bytes_received = register!(BytesReceived::from(Protocol::NONE));
+    let events_received = register!(EventsReceived);
 
     for n in 0..count {
         if matches!(futures::poll!(&mut shutdown), Poll::Ready(_)) {
@@ -157,10 +234,7 @@ async fn demo_logs_source(
         if let Some(interval) = &mut interval {
             interval.tick().await;
         }
-        emit!(&BytesReceived {
-            byte_size: 0,
-            protocol: "none",
-        });
+        bytes_received.emit(ByteSize(0));
 
         let line = format.generate_line(n);
 
@@ -169,22 +243,36 @@ async fn demo_logs_source(
             match next {
                 Ok((events, _byte_size)) => {
                     let count = events.len();
-                    emit!(&EventsReceived {
-                        count,
-                        byte_size: events.size_of()
-                    });
+                    let byte_size = events.estimated_json_encoded_size_of();
+                    events_received.emit(CountByteSize(count, byte_size));
                     let now = Utc::now();
 
-                    let mut events = stream::iter(events).map(|mut event| {
+                    let events = events.into_iter().map(|mut event| {
                         let log = event.as_mut_log();
-
-                        log.try_insert(log_schema().source_type_key(), Bytes::from("demo_logs"));
-                        log.try_insert(log_schema().timestamp_key(), now);
+                        log_namespace.insert_standard_vector_source_metadata(
+                            log,
+                            DemoLogsConfig::NAME,
+                            now,
+                        );
+                        log_namespace.insert_source_metadata(
+                            DemoLogsConfig::NAME,
+                            log,
+                            Some(LegacyKey::InsertIfEmpty(path!("service"))),
+                            path!("service"),
+                            "vector",
+                        );
+                        log_namespace.insert_source_metadata(
+                            DemoLogsConfig::NAME,
+                            log,
+                            Some(LegacyKey::InsertIfEmpty(path!("host"))),
+                            path!("host"),
+                            "localhost",
+                        );
 
                         event
                     });
-                    out.send_all(&mut events).await.map_err(|error| {
-                        emit!(&StreamClosedError { error, count });
+                    out.send_batch(events).await.map_err(|_| {
+                        emit!(StreamClosedError { count });
                     })?;
                 }
                 Err(error) => {
@@ -201,22 +289,18 @@ async fn demo_logs_source(
     Ok(())
 }
 
-inventory::submit! {
-    SourceDescription::new::<DemoLogsConfig>("demo_logs")
-}
-
-inventory::submit! {
-    SourceDescription::new::<DemoLogsConfig>("generator")
-}
-
 impl_generate_config_from_default!(DemoLogsConfig);
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "demo_logs")]
 impl SourceConfig for DemoLogsConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
+        let log_namespace = cx.log_namespace(self.log_namespace);
+
         self.format.validate()?;
-        let decoder = DecodingConfig::new(self.framing.clone(), self.decoding.clone()).build();
+        let decoder =
+            DecodingConfig::new(self.framing.clone(), self.decoding.clone(), log_namespace)
+                .build()?;
         Ok(Box::pin(demo_logs_source(
             self.interval,
             self.count,
@@ -224,35 +308,35 @@ impl SourceConfig for DemoLogsConfig {
             decoder,
             cx.shutdown,
             cx.out,
+            log_namespace,
         )))
     }
 
-    fn outputs(&self) -> Vec<Output> {
-        vec![Output::default(DataType::Log)]
+    fn outputs(&self, global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
+        // There is a global and per-source `log_namespace` config. The source config overrides the global setting,
+        // and is merged here.
+        let log_namespace = global_log_namespace.merge(self.log_namespace);
+
+        let schema_definition = self
+            .decoding
+            .schema_definition(log_namespace)
+            .with_standard_vector_source_metadata()
+            .with_source_metadata(
+                DemoLogsConfig::NAME,
+                Some(LegacyKey::InsertIfEmpty(owned_value_path!("service"))),
+                &owned_value_path!("service"),
+                Kind::bytes(),
+                Some("service"),
+            );
+
+        vec![SourceOutput::new_maybe_logs(
+            self.decoding.output_type(),
+            schema_definition,
+        )]
     }
 
-    fn source_type(&self) -> &'static str {
-        "demo_logs"
-    }
-}
-
-// Add a compatibility alias to avoid breaking existing configs
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct DemoLogsCompatConfig(DemoLogsConfig);
-
-#[async_trait::async_trait]
-#[typetag::serde(name = "generator")]
-impl SourceConfig for DemoLogsCompatConfig {
-    async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
-        self.0.build(cx).await
-    }
-
-    fn outputs(&self) -> Vec<Output> {
-        self.0.outputs()
-    }
-
-    fn source_type(&self) -> &'static str {
-        self.0.source_type()
+    fn can_acknowledge(&self) -> bool {
+        false
     }
 }
 
@@ -260,11 +344,14 @@ impl SourceConfig for DemoLogsCompatConfig {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use futures::{poll, StreamExt};
+    use futures::{poll, Stream, StreamExt};
 
     use super::*;
     use crate::{
-        config::log_schema, event::Event, shutdown::ShutdownSignal, source_sender::ReceiverStream,
+        config::log_schema,
+        event::Event,
+        shutdown::ShutdownSignal,
+        test_util::components::{assert_source_compliance, SOURCE_TAGS},
         SourceSender,
     };
 
@@ -273,22 +360,32 @@ mod tests {
         crate::test_util::test_generate_config::<DemoLogsConfig>();
     }
 
-    async fn runit(config: &str) -> ReceiverStream<Event> {
-        let (tx, rx) = SourceSender::new_test();
-        let config: DemoLogsConfig = toml::from_str(config).unwrap();
-        let decoder =
-            DecodingConfig::new(default_framing_message_based(), default_decoding()).build();
-        demo_logs_source(
-            config.interval,
-            config.count,
-            config.format,
-            decoder,
-            ShutdownSignal::noop(),
-            tx,
-        )
+    async fn runit(config: &str) -> impl Stream<Item = Event> {
+        assert_source_compliance(&SOURCE_TAGS, async {
+            let (tx, rx) = SourceSender::new_test();
+            let config: DemoLogsConfig = toml::from_str(config).unwrap();
+            let decoder = DecodingConfig::new(
+                default_framing_message_based(),
+                default_decoding(),
+                LogNamespace::Legacy,
+            )
+            .build()
+            .unwrap();
+            demo_logs_source(
+                config.interval,
+                config.count,
+                config.format,
+                decoder,
+                ShutdownSignal::noop(),
+                tx,
+                LogNamespace::Legacy,
+            )
+            .await
+            .unwrap();
+
+            rx
+        })
         .await
-        .unwrap();
-        rx
     }
 
     #[test]
@@ -311,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn shuffle_demo_logs_copies_lines() {
-        let message_key = log_schema().message_key();
+        let message_key = log_schema().message_key().unwrap().to_string();
         let mut rx = runit(
             r#"format = "shuffle"
                lines = ["one", "two", "three", "four"]
@@ -351,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn shuffle_demo_logs_adds_sequence() {
-        let message_key = log_schema().message_key();
+        let message_key = log_schema().message_key().unwrap().to_string();
         let mut rx = runit(
             r#"format = "shuffle"
                lines = ["one", "two"]
@@ -391,6 +488,24 @@ mod tests {
 
         let duration = start.elapsed();
         assert!(duration >= Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn host_is_set() {
+        let host_key = log_schema().host_key().unwrap().to_string();
+        let mut rx = runit(
+            r#"format = "syslog"
+            count = 5"#,
+        )
+        .await;
+
+        let event = match poll!(rx.next()) {
+            Poll::Ready(event) => event.unwrap(),
+            _ => unreachable!(),
+        };
+        let log = event.as_log();
+        let host = log[&host_key].to_string_lossy();
+        assert_eq!("localhost", host);
     }
 
     #[tokio::test]
@@ -451,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_format_generates_output() {
-        let message_key = log_schema().message_key();
+        let message_key = log_schema().message_key().unwrap().to_string();
         let mut rx = runit(
             r#"format = "json"
             count = 5"#,

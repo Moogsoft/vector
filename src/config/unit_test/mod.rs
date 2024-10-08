@@ -1,41 +1,55 @@
-#[cfg(all(test, feature = "transforms-add_fields", feature = "transforms-route"))]
+// should match vector-unit-test-tests feature
+#[cfg(all(
+    test,
+    feature = "sources-demo_logs",
+    feature = "transforms-remap",
+    feature = "transforms-route",
+    feature = "transforms-filter",
+    feature = "transforms-reduce",
+    feature = "sinks-console"
+))]
 mod tests;
 mod unit_test_components;
 
-use crate::{
-    conditions::Condition,
-    config::{
-        self, compiler::expand_macros, loading, ComponentKey, Config, ConfigBuilder, ConfigPath,
-        SinkOuter, SourceOuter, TestDefinition, TestInput, TestInputValue, TestOutput,
-    },
-    event::{Event, Value},
-    topology::{
-        self,
-        builder::{self, Pieces},
-    },
-};
-use futures_util::{stream::FuturesUnordered, StreamExt};
-use indexmap::IndexMap;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
+
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use indexmap::IndexMap;
+use ordered_float::NotNan;
 use tokio::sync::{
     oneshot::{self, Receiver},
     Mutex,
 };
 use uuid::Uuid;
-
-use self::unit_test_components::{
-    UnitTestSinkCheck, UnitTestSinkConfig, UnitTestSinkResult, UnitTestSourceConfig,
+use vrl::{
+    compiler::{state::RuntimeState, Context, TargetValue, TimeZone},
+    diagnostic::Formatter,
+    value,
 };
 
-use super::{compiler::expand_globs, graph::Graph, OutputId};
+pub use self::unit_test_components::{
+    UnitTestSinkCheck, UnitTestSinkConfig, UnitTestSinkResult, UnitTestSourceConfig,
+    UnitTestStreamSinkConfig, UnitTestStreamSourceConfig,
+};
+use super::{compiler::expand_globs, graph::Graph, transform::get_transform_output_ids, OutputId};
+use crate::{
+    conditions::Condition,
+    config::{
+        self, loading, ComponentKey, Config, ConfigBuilder, ConfigPath, SinkOuter, SourceOuter,
+        TestDefinition, TestInput, TestInputValue, TestOutput,
+    },
+    event::{Event, EventMetadata, LogEvent, Value},
+    signal,
+    topology::{builder::TopologyPieces, RunningTopology},
+};
 
 pub struct UnitTest {
     pub name: String,
     config: Config,
-    pieces: Pieces,
+    pieces: TopologyPieces,
     test_result_rxs: Vec<Receiver<UnitTestSinkResult>>,
 }
 
@@ -46,10 +60,10 @@ pub struct UnitTestResult {
 impl UnitTest {
     pub async fn run(self) -> UnitTestResult {
         let diff = config::ConfigDiff::initial(&self.config);
-        let (topology, _) = topology::start_validated(self.config, diff, self.pieces)
+        let (topology, _) = RunningTopology::start_validated(self.config, diff, self.pieces)
             .await
             .unwrap();
-        let _ = topology.sources_finished().await;
+        topology.sources_finished().await;
         let _stop_complete = topology.stop();
 
         let mut in_flight = self
@@ -69,10 +83,34 @@ impl UnitTest {
     }
 }
 
-pub async fn build_unit_tests_main(paths: &[ConfigPath]) -> Result<Vec<UnitTest>, Vec<String>> {
-    config::init_log_schema(paths, false)?;
+/// Loads Log Schema from configurations and sets global schema.
+/// Once this is done, configurations can be correctly loaded using
+/// configured log schema defaults.
+/// If deny is set, will panic if schema has already been set.
+fn init_log_schema_from_paths(
+    config_paths: &[ConfigPath],
+    deny_if_set: bool,
+) -> Result<(), Vec<String>> {
+    let builder = config::loading::load_builder_from_paths(config_paths)?;
+    vector_lib::config::init_log_schema(builder.global.log_schema, deny_if_set);
+    Ok(())
+}
 
-    let (config_builder, _) = loading::load_builder_from_paths(paths)?;
+pub async fn build_unit_tests_main(
+    paths: &[ConfigPath],
+    signal_handler: &mut signal::SignalHandler,
+) -> Result<Vec<UnitTest>, Vec<String>> {
+    init_log_schema_from_paths(paths, false)?;
+    let mut secrets_backends_loader = loading::load_secret_backends_from_paths(paths)?;
+    let config_builder = if secrets_backends_loader.has_secrets_to_retrieve() {
+        let resolved_secrets = secrets_backends_loader
+            .retrieve(&mut signal_handler.subscribe())
+            .await
+            .map_err(|e| vec![e])?;
+        loading::load_builder_from_paths_with_secrets(paths, resolved_secrets)?
+    } else {
+        loading::load_builder_from_paths(paths)?
+    };
 
     build_unit_tests(config_builder).await
 }
@@ -101,7 +139,7 @@ pub async fn build_unit_tests(
             Err(errors) => {
                 let mut test_error = errors.join("\n");
                 // Indent all line breaks
-                test_error = test_error.replace("\n", "\n  ");
+                test_error = test_error.replace('\n', "\n  ");
                 test_error.insert_str(0, &format!("Failed to build test '{}':\n  ", test_name));
                 build_errors.push(test_error);
             }
@@ -150,27 +188,21 @@ impl UnitTestBuildMetadata {
                 .get(key)
                 .expect("Missing test source for a transform")
                 .clone();
-            transform.inputs.push(test_source_id);
+            transform.inputs.extend(Some(test_source_id));
 
             template_sources.insert(key.clone(), UnitTestSourceConfig::default());
         }
 
-        // In order to attach a sink to any valid extraction point, we need to
-        // expand relevant transforms
-        let mut builder = config_builder.clone();
-        let _ = expand_macros(&mut builder)?;
+        let builder = config_builder.clone();
         let available_extract_targets = builder
             .transforms
             .iter()
             .flat_map(|(key, transform)| {
-                transform
-                    .inner
-                    .outputs()
-                    .into_iter()
-                    .map(|output| OutputId {
-                        component: key.clone(),
-                        port: output.port,
-                    })
+                get_transform_output_ids(
+                    transform.inner.as_ref(),
+                    key.clone(),
+                    builder.schema.log_namespace(),
+                )
             })
             .collect::<HashSet<_>>();
 
@@ -181,7 +213,7 @@ impl UnitTestBuildMetadata {
                     key.clone(),
                     format!(
                         "{}-{}-{}",
-                        key.to_string().replace(".", "-"),
+                        key.to_string().replace('.', "-"),
                         "sink",
                         random_id
                     ),
@@ -207,15 +239,18 @@ impl UnitTestBuildMetadata {
         Ok(inputs
             .into_iter()
             .map(|(insert_at, events)| {
-                let mut source_config = template_sources.remove(&insert_at).unwrap_or_else(|| {
-                    // At this point, all inputs should have been validated to
-                    // correspond with valid transforms, and all valid transforms
-                    // have a source attached.
-                    panic!(
-                        "Invalid input: cannot insert at {:?}",
-                        insert_at.to_string()
-                    )
-                });
+                let mut source_config =
+                    template_sources
+                        .shift_remove(&insert_at)
+                        .unwrap_or_else(|| {
+                            // At this point, all inputs should have been validated to
+                            // correspond with valid transforms, and all valid transforms
+                            // have a source attached.
+                            panic!(
+                                "Invalid input: cannot insert at {:?}",
+                                insert_at.to_string()
+                            )
+                        });
                 source_config.events.extend(events);
                 let id: &str = self
                     .source_ids
@@ -251,17 +286,18 @@ impl UnitTestBuildMetadata {
         let mut template_sinks = IndexMap::new();
         let mut test_result_rxs = Vec::new();
         // Add sinks with checks
-        for (id, checks) in outputs {
+        for (ids, checks) in outputs {
             let (tx, rx) = oneshot::channel();
+            let sink_ids = ids.clone();
             let sink_config = UnitTestSinkConfig {
                 test_name: test_name.to_string(),
-                transform_id: id.to_string(),
+                transform_ids: ids.iter().map(|id| id.to_string()).collect(),
                 result_tx: Arc::new(Mutex::new(Some(tx))),
                 check: UnitTestSinkCheck::Checks(checks),
             };
 
             test_result_rxs.push(rx);
-            template_sinks.insert(id.clone(), sink_config);
+            template_sinks.insert(sink_ids, sink_config);
         }
 
         // Add sinks with no outputs check
@@ -269,26 +305,35 @@ impl UnitTestBuildMetadata {
             let (tx, rx) = oneshot::channel();
             let sink_config = UnitTestSinkConfig {
                 test_name: test_name.to_string(),
-                transform_id: id.to_string(),
+                transform_ids: vec![id.to_string()],
                 result_tx: Arc::new(Mutex::new(Some(tx))),
                 check: UnitTestSinkCheck::NoOutputs,
             };
 
             test_result_rxs.push(rx);
-            template_sinks.insert(id.clone(), sink_config);
+            template_sinks.insert(vec![id.clone()], sink_config);
         }
 
         let sinks = template_sinks
             .into_iter()
-            .map(|(transform_id, sink_config)| {
-                let sink_id = self
-                    .sink_ids
-                    .get(&transform_id)
-                    .expect("Sink does not exist")
-                    .as_ref();
+            .map(|(transform_ids, sink_config)| {
+                let transform_ids_str = transform_ids
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>();
+                let sink_ids = transform_ids
+                    .iter()
+                    .map(|transform_id| {
+                        self.sink_ids
+                            .get(transform_id)
+                            .expect("Sink does not exist")
+                            .as_str()
+                    })
+                    .collect::<Vec<_>>();
+                let sink_id = sink_ids.join(",");
                 (
                     ComponentKey::from(sink_id),
-                    SinkOuter::new(vec![transform_id.to_string()], Box::new(sink_config)),
+                    SinkOuter::new(transform_ids_str, sink_config),
                 )
             })
             .collect::<IndexMap<_, _>>();
@@ -302,7 +347,7 @@ fn get_relevant_test_components(
     sources: &[&ComponentKey],
     graph: &Graph,
 ) -> Result<HashSet<String>, Vec<String>> {
-    let _ = graph.check_for_cycles().map_err(|error| vec![error])?;
+    graph.check_for_cycles().map_err(|error| vec![error])?;
     let mut errors = Vec::new();
     let mut components = HashSet::new();
     for source in sources {
@@ -335,14 +380,14 @@ async fn build_unit_test(
     test: TestDefinition<String>,
     mut config_builder: ConfigBuilder,
 ) -> Result<UnitTest, Vec<String>> {
-    let mut transform_only_config = config_builder.clone();
-    let _ = expand_macros(&mut transform_only_config);
+    let transform_only_config = config_builder.clone();
     let transform_only_graph = Graph::new_unchecked(
         &transform_only_config.sources,
         &transform_only_config.transforms,
         &transform_only_config.sinks,
+        transform_only_config.schema,
     );
-    let test = test.resolve_outputs(&transform_only_graph);
+    let test = test.resolve_outputs(&transform_only_graph)?;
 
     let sources = metadata.hydrate_into_sources(&test.inputs)?;
     let (test_result_rxs, sinks) =
@@ -352,15 +397,11 @@ async fn build_unit_test(
     config_builder.sinks = sinks;
     expand_globs(&mut config_builder);
 
-    // To properly identify all components relevant to the test, expand relevant
-    // transforms
-    let mut expanded_config = config_builder.clone();
-    let _ = expand_macros(&mut expanded_config);
-
     let graph = Graph::new_unchecked(
-        &expanded_config.sources,
-        &expanded_config.transforms,
-        &expanded_config.sinks,
+        &config_builder.sources,
+        &config_builder.transforms,
+        &config_builder.sinks,
+        config_builder.schema,
     );
 
     let mut valid_components = get_relevant_test_components(
@@ -373,7 +414,7 @@ async fn build_unit_test(
         .iter()
         .filter_map(|component| {
             component
-                .split_once(".")
+                .split_once('.')
                 .map(|(original_name, _)| original_name.to_string())
         })
         .collect::<Vec<_>>();
@@ -391,6 +432,7 @@ async fn build_unit_test(
         &config_builder.sources,
         &config_builder.transforms,
         &config_builder.sinks,
+        config_builder.schema,
     );
     let valid_inputs = graph.input_map()?;
     for (_, transform) in config_builder.transforms.iter_mut() {
@@ -398,12 +440,17 @@ async fn build_unit_test(
         transform.inputs = inputs
             .into_iter()
             .filter(|input| valid_inputs.contains_key(input))
-            .collect::<Vec<_>>();
+            .collect();
     }
 
+    if let Some(sink) = get_loose_end_outputs_sink(&config_builder) {
+        config_builder
+            .sinks
+            .insert(ComponentKey::from(Uuid::new_v4().to_string()), sink);
+    }
     let config = config_builder.build()?;
     let diff = config::ConfigDiff::initial(&config);
-    let pieces = builder::build_pieces(&config, &diff, HashMap::new()).await?;
+    let pieces = TopologyPieces::build(&config, &diff, HashMap::new(), Default::default()).await?;
 
     Ok(UnitTest {
         name: test.name,
@@ -411,6 +458,52 @@ async fn build_unit_test(
         pieces,
         test_result_rxs,
     })
+}
+
+/// Near the end of building a unit test, it's possible that we've included a
+/// transform(s) with multiple outputs where at least one of its output is
+/// consumed but its other outputs are left unconsumed.
+///
+/// To avoid warning logs that occur when building such topologies, we construct
+/// a NoOp sink here whose sole purpose is to consume any "loose end" outputs.
+fn get_loose_end_outputs_sink(config: &ConfigBuilder) -> Option<SinkOuter<String>> {
+    let config = config.clone();
+    let transform_ids = config.transforms.iter().flat_map(|(key, transform)| {
+        get_transform_output_ids(
+            transform.inner.as_ref(),
+            key.clone(),
+            config.schema.log_namespace(),
+        )
+        .map(|output| output.to_string())
+        .collect::<Vec<_>>()
+    });
+
+    let mut loose_end_outputs = Vec::new();
+    for id in transform_ids {
+        if !config
+            .transforms
+            .iter()
+            .any(|(_, transform)| transform.inputs.contains(&id))
+            && !config
+                .sinks
+                .iter()
+                .any(|(_, sink)| sink.inputs.contains(&id))
+        {
+            loose_end_outputs.push(id);
+        }
+    }
+
+    if loose_end_outputs.is_empty() {
+        None
+    } else {
+        let noop_sink = UnitTestSinkConfig {
+            test_name: "".to_string(),
+            transform_ids: vec![],
+            result_tx: Arc::new(Mutex::new(None)),
+            check: UnitTestSinkCheck::NoOp,
+        };
+        Some(SinkOuter::new(loose_end_outputs, noop_sink))
+    }
 }
 
 fn build_and_validate_inputs(
@@ -454,8 +547,8 @@ fn build_and_validate_inputs(
 
 fn build_outputs(
     test_outputs: &[TestOutput],
-) -> Result<IndexMap<OutputId, Vec<Vec<Box<dyn Condition>>>>, Vec<String>> {
-    let mut outputs: IndexMap<OutputId, Vec<Vec<Box<dyn Condition>>>> = IndexMap::new();
+) -> Result<IndexMap<Vec<OutputId>, Vec<Vec<Condition>>>, Vec<String>> {
+    let mut outputs: IndexMap<Vec<OutputId>, Vec<Vec<Condition>>> = IndexMap::new();
     let mut errors = Vec::new();
 
     for output in test_outputs {
@@ -477,9 +570,9 @@ fn build_outputs(
         }
 
         outputs
-            .entry(output.extract_from.clone())
+            .entry(output.extract_from.clone().to_vec())
             .and_modify(|existing_conditions| existing_conditions.push(conditions.clone()))
-            .or_insert(vec![conditions]);
+            .or_insert(vec![conditions.clone()]);
     }
 
     if errors.is_empty() {
@@ -492,22 +585,56 @@ fn build_outputs(
 fn build_input_event(input: &TestInput) -> Result<Event, String> {
     match input.type_str.as_ref() {
         "raw" => match input.value.as_ref() {
-            Some(v) => Ok(Event::from(v.clone())),
+            Some(v) => Ok(Event::Log(LogEvent::from_str_legacy(v.clone()))),
             None => Err("input type 'raw' requires the field 'value'".to_string()),
         },
+        "vrl" => {
+            if let Some(source) = &input.source {
+                let fns = vrl::stdlib::all();
+                let result = vrl::compiler::compile(source, &fns)
+                    .map_err(|e| Formatter::new(source, e.clone()).to_string())?;
+
+                let mut target = TargetValue {
+                    value: value!({}),
+                    metadata: value::Value::Object(BTreeMap::new()),
+                    secrets: value::Secrets::default(),
+                };
+
+                let mut state = RuntimeState::default();
+                let timezone = TimeZone::default();
+                let mut ctx = Context::new(&mut target, &mut state, &timezone);
+
+                result
+                    .program
+                    .resolve(&mut ctx)
+                    .map(|_| {
+                        Event::Log(LogEvent::from_parts(
+                            target.value.clone(),
+                            EventMetadata::default_with_value(target.metadata.clone()),
+                        ))
+                    })
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("input type 'vrl' requires the field 'source'".to_string())
+            }
+        }
         "log" => {
             if let Some(log_fields) = &input.log_fields {
-                let mut event = Event::from("");
+                let mut event = LogEvent::from_str_legacy("");
                 for (path, value) in log_fields {
                     let value: Value = match value {
                         TestInputValue::String(s) => Value::from(s.to_owned()),
                         TestInputValue::Boolean(b) => Value::from(*b),
                         TestInputValue::Integer(i) => Value::from(*i),
-                        TestInputValue::Float(f) => Value::from(*f),
+                        TestInputValue::Float(f) => Value::from(
+                            NotNan::new(*f).map_err(|_| "NaN value not supported".to_string())?,
+                        ),
                     };
-                    event.as_mut_log().insert(path.to_owned(), value);
+                    event
+                        .parse_path_and_insert(path, value)
+                        .map_err(|e| e.to_string())?;
                 }
-                Ok(event)
+                Ok(event.into())
             } else {
                 Err("input type 'log' requires the field 'log_fields'".to_string())
             }

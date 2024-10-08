@@ -7,7 +7,7 @@ use std::{
 };
 
 use metrics::gauge;
-use vector_core::internal_event::InternalEvent;
+use vector_lib::internal_event::InternalEvent;
 
 #[derive(Debug)]
 pub struct ConnectionOpen {
@@ -15,8 +15,19 @@ pub struct ConnectionOpen {
 }
 
 impl InternalEvent for ConnectionOpen {
-    fn emit_metrics(&self) {
-        gauge!("open_connections", self.count as f64);
+    fn emit(self) {
+        gauge!("open_connections").set(self.count as f64);
+    }
+}
+
+#[derive(Debug)]
+pub struct EndpointsActive {
+    pub count: usize,
+}
+
+impl InternalEvent for EndpointsActive {
+    fn emit(self) {
+        gauge!("active_endpoints").set(self.count as f64);
     }
 }
 
@@ -42,6 +53,7 @@ impl OpenGauge {
         }
     }
 
+    #[cfg(all(feature = "sources-utils-net-unix", unix))]
     pub fn any_open(&self) -> bool {
         self.gauge.load(Ordering::Acquire) != 0
     }

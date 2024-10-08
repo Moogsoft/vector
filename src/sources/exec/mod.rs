@@ -1,13 +1,12 @@
 use std::{
+    collections::HashMap,
     io::{Error, ErrorKind},
     path::PathBuf,
     process::ExitStatus,
 };
 
-use bytes::Bytes;
 use chrono::Utc;
-use futures::{FutureExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use futures::StreamExt;
 use smallvec::SmallVec;
 use snafu::Snafu;
 use tokio::{
@@ -18,72 +17,127 @@ use tokio::{
 };
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::codec::FramedRead;
-use vector_core::ByteSizeOf;
+use vector_lib::codecs::{
+    decoding::{DeserializerConfig, FramingConfig},
+    StreamDecodingError,
+};
+use vector_lib::configurable::configurable_component;
+use vector_lib::internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol};
+use vector_lib::{config::LegacyKey, EstimatedJsonEncodedSizeOf};
+use vrl::path::OwnedValuePath;
+use vrl::value::Kind;
 
 use crate::{
-    async_read::VecAsyncReadExt,
-    codecs::{
-        self,
-        decoding::{DecodingConfig, DeserializerConfig, FramingConfig},
-    },
-    config::{log_schema, DataType, Output, SourceConfig, SourceContext, SourceDescription},
+    codecs::{Decoder, DecodingConfig},
+    config::{SourceConfig, SourceContext, SourceOutput},
     event::Event,
     internal_events::{
-        ExecCommandExecuted, ExecEventsReceived, ExecFailedError, ExecTimeoutError,
-        StreamClosedError,
+        ExecChannelClosedError, ExecCommandExecuted, ExecEventsReceived, ExecFailedError,
+        ExecFailedToSignalChild, ExecFailedToSignalChildError, ExecTimeoutError, StreamClosedError,
     },
-    serde::{default_decoding, default_framing_stream_based},
+    serde::default_decoding,
     shutdown::ShutdownSignal,
-    sources::util::StreamDecodingError,
     SourceSender,
 };
+use vector_lib::config::{log_schema, LogNamespace};
+use vector_lib::lookup::{owned_value_path, path};
 
-pub mod sized_bytes_codec;
+#[cfg(test)]
+mod tests;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(default, deny_unknown_fields)]
+/// Configuration for the `exec` source.
+#[configurable_component(source("exec", "Collect output from a process running on the host."))]
+#[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ExecConfig {
+    #[configurable(derived)]
     pub mode: Mode,
+
+    #[configurable(derived)]
     pub scheduled: Option<ScheduledConfig>,
+
+    #[configurable(derived)]
     pub streaming: Option<StreamingConfig>,
+
+    /// The command to run, plus any arguments required.
+    #[configurable(metadata(docs::examples = "echo", docs::examples = "Hello World!"))]
     pub command: Vec<String>,
+
+    /// Custom environment variables to set or update when running the command.
+    /// If a variable name already exists in the environment, its value is replaced.
+    #[serde(default)]
+    #[configurable(metadata(docs::additional_props_description = "An environment variable."))]
+    #[configurable(metadata(docs::examples = "environment_examples()"))]
+    pub environment: Option<HashMap<String, String>>,
+
+    /// Whether or not to clear the environment before setting custom environment variables.
+    #[serde(default = "default_clear_environment")]
+    pub clear_environment: bool,
+
+    /// The directory in which to run the command.
     pub working_directory: Option<PathBuf>,
+
+    /// Whether or not the output from stderr should be included when generating events.
     #[serde(default = "default_include_stderr")]
     pub include_stderr: bool,
+
+    /// The maximum buffer size allowed before a log event is generated.
     #[serde(default = "default_maximum_buffer_size")]
     pub maximum_buffer_size_bytes: usize,
-    #[serde(default = "default_framing_stream_based")]
-    framing: FramingConfig,
+
+    #[configurable(derived)]
+    framing: Option<FramingConfig>,
+
+    #[configurable(derived)]
     #[serde(default = "default_decoding")]
     decoding: DeserializerConfig,
+
+    /// The namespace to use for logs. This overrides the global setting.
+    #[configurable(metadata(docs::hidden))]
+    #[serde(default)]
+    log_namespace: Option<bool>,
 }
 
-// TODO: Would be nice to combine the scheduled and streaming config with the mode enum once
-//       this serde ticket has been addressed (https://github.com/serde-rs/serde/issues/2013)
-#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+/// Mode of operation for running the command.
+#[configurable_component]
+#[derive(Clone, Copy, Debug)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Mode {
+    /// The command is run on a schedule.
     Scheduled,
+
+    /// The command is run until it exits, potentially being restarted.
     Streaming,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+/// Configuration options for scheduled commands.
+#[configurable_component]
+#[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduledConfig {
+    /// The interval, in seconds, between scheduled command runs.
+    ///
+    /// If the command takes longer than `exec_interval_secs` to run, it is killed.
     #[serde(default = "default_exec_interval_secs")]
     exec_interval_secs: u64,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+/// Configuration options for streaming commands.
+#[configurable_component]
+#[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct StreamingConfig {
+    /// Whether or not the command should be rerun if the command exits.
     #[serde(default = "default_respawn_on_exit")]
     respawn_on_exit: bool,
+
+    /// The amount of time, in seconds, before rerunning a streaming command that exited.
     #[serde(default = "default_respawn_interval_secs")]
+    #[configurable(metadata(docs::human_name = "Respawn Interval"))]
     respawn_interval_secs: u64,
 }
 
-#[derive(Debug, PartialEq, Snafu)]
+#[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum ExecConfigError {
     #[snafu(display("A non-empty list for command must be provided"))]
     CommandEmpty,
@@ -100,11 +154,14 @@ impl Default for ExecConfig {
             }),
             streaming: None,
             command: vec!["echo".to_owned(), "Hello World!".to_owned()],
+            environment: None,
+            clear_environment: default_clear_environment(),
             working_directory: None,
             include_stderr: default_include_stderr(),
             maximum_buffer_size_bytes: default_maximum_buffer_size(),
-            framing: default_framing_stream_based(),
+            framing: None,
             decoding: default_decoding(),
+            log_namespace: None,
         }
     }
 }
@@ -126,24 +183,31 @@ const fn default_respawn_on_exit() -> bool {
     true
 }
 
+const fn default_clear_environment() -> bool {
+    false
+}
+
 const fn default_include_stderr() -> bool {
     true
+}
+
+fn environment_examples() -> HashMap<String, String> {
+    HashMap::<_, _>::from_iter([
+        ("LANG".to_owned(), "es_ES.UTF-8".to_owned()),
+        ("TZ".to_owned(), "Etc/UTC".to_owned()),
+        ("PATH".to_owned(), "/bin:/usr/bin:/usr/local/bin".to_owned()),
+    ])
 }
 
 fn get_hostname() -> Option<String> {
     crate::get_hostname().ok()
 }
 
-const EXEC: &str = "exec";
 const STDOUT: &str = "stdout";
 const STDERR: &str = "stderr";
 const STREAM_KEY: &str = "stream";
 const PID_KEY: &str = "pid";
 const COMMAND_KEY: &str = "command";
-
-inventory::submit! {
-    SourceDescription::new::<ExecConfig>("exec")
-}
 
 impl_generate_config_from_default!(ExecConfig);
 
@@ -190,7 +254,15 @@ impl SourceConfig for ExecConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         self.validate()?;
         let hostname = get_hostname();
-        let decoder = DecodingConfig::new(self.framing.clone(), self.decoding.clone()).build();
+        let log_namespace = cx.log_namespace(self.log_namespace);
+
+        let framing = self
+            .framing
+            .clone()
+            .unwrap_or_else(|| self.decoding.default_stream_framing());
+        let decoder =
+            DecodingConfig::new(framing, self.decoding.clone(), LogNamespace::Legacy).build()?;
+
         match &self.mode {
             Mode::Scheduled => {
                 let exec_interval_secs = self.exec_interval_secs_or_default();
@@ -202,6 +274,7 @@ impl SourceConfig for ExecConfig {
                     decoder,
                     cx.shutdown,
                     cx.out,
+                    log_namespace,
                 )))
             }
             Mode::Streaming => {
@@ -216,17 +289,60 @@ impl SourceConfig for ExecConfig {
                     decoder,
                     cx.shutdown,
                     cx.out,
+                    log_namespace,
                 )))
             }
         }
     }
 
-    fn outputs(&self) -> Vec<Output> {
-        vec![Output::default(DataType::Log)]
+    fn outputs(&self, global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
+        let log_namespace = global_log_namespace.merge(Some(self.log_namespace.unwrap_or(false)));
+
+        let schema_definition = self
+            .decoding
+            .schema_definition(log_namespace)
+            .with_standard_vector_source_metadata()
+            .with_source_metadata(
+                Self::NAME,
+                Some(LegacyKey::InsertIfEmpty(
+                    log_schema()
+                        .host_key()
+                        .map_or(OwnedValuePath::root(), |key| key.clone()),
+                )),
+                &owned_value_path!("host"),
+                Kind::bytes().or_undefined(),
+                Some("host"),
+            )
+            .with_source_metadata(
+                Self::NAME,
+                Some(LegacyKey::InsertIfEmpty(owned_value_path!(STREAM_KEY))),
+                &owned_value_path!(STREAM_KEY),
+                Kind::bytes().or_undefined(),
+                None,
+            )
+            .with_source_metadata(
+                Self::NAME,
+                Some(LegacyKey::InsertIfEmpty(owned_value_path!(PID_KEY))),
+                &owned_value_path!(PID_KEY),
+                Kind::integer().or_undefined(),
+                None,
+            )
+            .with_source_metadata(
+                Self::NAME,
+                Some(LegacyKey::InsertIfEmpty(owned_value_path!(COMMAND_KEY))),
+                &owned_value_path!(COMMAND_KEY),
+                Kind::bytes(),
+                None,
+            );
+
+        vec![SourceOutput::new_maybe_logs(
+            self.decoding.output_type(),
+            schema_definition,
+        )]
     }
 
-    fn source_type(&self) -> &'static str {
-        EXEC
+    fn can_acknowledge(&self) -> bool {
+        false
     }
 }
 
@@ -234,9 +350,10 @@ async fn run_scheduled(
     config: ExecConfig,
     hostname: Option<String>,
     exec_interval_secs: u64,
-    decoder: codecs::Decoder,
+    decoder: Decoder,
     shutdown: ShutdownSignal,
     out: SourceSender,
+    log_namespace: LogNamespace,
 ) -> Result<(), ()> {
     debug!("Starting scheduled exec runs.");
     let schedule = Duration::from_secs(exec_interval_secs);
@@ -253,6 +370,7 @@ async fn run_scheduled(
                 decoder.clone(),
                 shutdown.clone(),
                 out.clone(),
+                log_namespace,
             ),
         )
         .await;
@@ -260,14 +378,14 @@ async fn run_scheduled(
         match timeout {
             Ok(output) => {
                 if let Err(command_error) = output {
-                    emit!(&ExecFailedError {
+                    emit!(ExecFailedError {
                         command: config.command_line().as_str(),
                         error: command_error,
                     });
                 }
             }
             Err(error) => {
-                emit!(&ExecTimeoutError {
+                emit!(ExecTimeoutError {
                     command: config.command_line().as_str(),
                     elapsed_seconds: schedule.as_secs(),
                     error,
@@ -280,54 +398,58 @@ async fn run_scheduled(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_streaming(
     config: ExecConfig,
     hostname: Option<String>,
     respawn_on_exit: bool,
     respawn_interval_secs: u64,
-    decoder: codecs::Decoder,
-    shutdown: ShutdownSignal,
+    decoder: Decoder,
+    mut shutdown: ShutdownSignal,
     out: SourceSender,
+    log_namespace: LogNamespace,
 ) -> Result<(), ()> {
     if respawn_on_exit {
         let duration = Duration::from_secs(respawn_interval_secs);
 
         // Continue to loop while not shutdown
         loop {
-            tokio::select! {
-                _ = shutdown.clone() => break, // will break early if a shutdown is started
-                output = run_command(
-                    config.clone(),
-                    hostname.clone(),
-                    decoder.clone(),
-                    shutdown.clone(),
-                    out.clone()
-                ) => {
-                    // handle command finished
-                    if let Err(command_error) = output {
-                        emit!(&ExecFailedError {
-                            command: config.command_line().as_str(),
-                            error: command_error,
-                        });
-                    }
-                }
-            }
+            let output = run_command(
+                config.clone(),
+                hostname.clone(),
+                decoder.clone(),
+                shutdown.clone(),
+                out.clone(),
+                log_namespace,
+            )
+            .await;
 
-            let mut poll_shutdown = shutdown.clone();
-            if futures::poll!(&mut poll_shutdown).is_pending() {
-                warn!("Streaming process ended before shutdown.");
+            // handle command finished
+            if let Err(command_error) = output {
+                emit!(ExecFailedError {
+                    command: config.command_line().as_str(),
+                    error: command_error,
+                });
             }
 
             tokio::select! {
-                _ = &mut poll_shutdown => break, // will break early if a shutdown is started
+                _ = &mut shutdown => break, // will break early if a shutdown is started
                 _ = sleep(duration) => debug!("Restarting streaming process."),
             }
         }
     } else {
-        let output = run_command(config.clone(), hostname, decoder, shutdown, out).await;
+        let output = run_command(
+            config.clone(),
+            hostname,
+            decoder,
+            shutdown,
+            out,
+            log_namespace,
+        )
+        .await;
 
         if let Err(command_error) = output {
-            emit!(&ExecFailedError {
+            emit!(ExecFailedError {
                 command: config.command_line().as_str(),
                 error: command_error,
             });
@@ -340,9 +462,10 @@ async fn run_streaming(
 async fn run_command(
     config: ExecConfig,
     hostname: Option<String>,
-    decoder: codecs::Decoder,
-    shutdown: ShutdownSignal,
+    decoder: Decoder,
+    mut shutdown: ShutdownSignal,
     mut out: SourceSender,
+    log_namespace: LogNamespace,
 ) -> Result<Option<ExitStatus>, Error> {
     debug!("Starting command run.");
     let mut command = build_command(&config);
@@ -363,7 +486,6 @@ async fn run_command(
         })?;
 
         // Create stderr async reader
-        let stderr = stderr.allow_read_until(shutdown.clone().map(|_| ()));
         let stderr_reader = BufReader::new(stderr);
 
         spawn_reader_thread(stderr_reader, decoder.clone(), STDERR, sender.clone());
@@ -375,42 +497,42 @@ async fn run_command(
         .ok_or_else(|| Error::new(ErrorKind::Other, "Unable to take stdout of spawned process"))?;
 
     // Create stdout async reader
-    let stdout = stdout.allow_read_until(shutdown.clone().map(|_| ()));
     let stdout_reader = BufReader::new(stdout);
 
     let pid = child.id();
 
     spawn_reader_thread(stdout_reader, decoder.clone(), STDOUT, sender);
 
-    'send: while let Some(((events, _byte_size), stream)) = receiver.recv().await {
-        emit!(&ExecEventsReceived {
-            count: events.len(),
-            command: config.command_line().as_str(),
-            byte_size: events.size_of(),
-        });
+    let bytes_received = register!(BytesReceived::from(Protocol::NONE));
 
-        let total_count = events.len();
-        let mut processed_count = 0;
-
-        for mut event in events {
-            handle_event(
-                &config,
-                &hostname,
-                &Some(stream.to_string()),
-                pid,
-                &mut event,
-            );
-
-            match out.send(event).await {
-                Ok(_) => {
-                    processed_count += 1;
+    'outer: loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                if !shutdown_child(&mut child, &command).await {
+                        break 'outer; // couldn't signal, exit early
                 }
-                Err(error) => {
-                    emit!(&StreamClosedError {
-                        count: total_count - processed_count,
-                        error,
-                    });
-                    break 'send;
+            }
+            v = receiver.recv() => {
+                match v {
+                    None => break 'outer,
+                    Some(((mut events, byte_size), stream)) => {
+                        bytes_received.emit(ByteSize(byte_size));
+
+                        let count = events.len();
+                        emit!(ExecEventsReceived {
+                            count,
+                            command: config.command_line().as_str(),
+                            byte_size: events.estimated_json_encoded_size_of(),
+                        });
+
+                        for event in &mut events {
+                            handle_event(&config, &hostname, &Some(stream.to_string()), pid, event, log_namespace);
+                        }
+                        if (out.send_batch(events).await).is_err() {
+                            emit!(StreamClosedError { count });
+                            break;
+                        }
+                    },
                 }
             }
         }
@@ -441,11 +563,67 @@ async fn run_command(
 }
 
 fn handle_exit_status(config: &ExecConfig, exit_status: Option<i32>, exec_duration: Duration) {
-    emit!(&ExecCommandExecuted {
+    emit!(ExecCommandExecuted {
         command: config.command_line().as_str(),
         exit_status,
         exec_duration,
     });
+}
+
+#[cfg(unix)]
+async fn shutdown_child(
+    child: &mut tokio::process::Child,
+    command: &tokio::process::Command,
+) -> bool {
+    match child.id().map(i32::try_from) {
+        Some(Ok(pid)) => {
+            // shutting down, send a SIGTERM to the child
+            if let Err(error) = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            ) {
+                emit!(ExecFailedToSignalChildError {
+                    command,
+                    error: ExecFailedToSignalChild::SignalError(error)
+                });
+                false
+            } else {
+                true
+            }
+        }
+        Some(Err(err)) => {
+            emit!(ExecFailedToSignalChildError {
+                command,
+                error: ExecFailedToSignalChild::FailedToMarshalPid(err)
+            });
+            false
+        }
+        None => {
+            emit!(ExecFailedToSignalChildError {
+                command,
+                error: ExecFailedToSignalChild::NoPid
+            });
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn shutdown_child(
+    child: &mut tokio::process::Child,
+    command: &tokio::process::Command,
+) -> bool {
+    // TODO Graceful shutdown of Windows processes
+    match child.kill().await {
+        Ok(()) => true,
+        Err(err) => {
+            emit!(ExecFailedToSignalChildError {
+                command: &command,
+                error: ExecFailedToSignalChild::IoError(err)
+            });
+            false
+        }
+    }
 }
 
 fn build_command(config: &ExecConfig) -> Command {
@@ -458,6 +636,16 @@ fn build_command(config: &ExecConfig) -> Command {
     };
 
     command.kill_on_drop(true);
+
+    // Clear environment variables if needed
+    if config.clear_environment {
+        command.env_clear();
+    }
+
+    // Configure environment variables if needed
+    if let Some(envs) = &config.environment {
+        command.envs(envs);
+    }
 
     // Explicitly set the current dir if needed
     if let Some(current_dir) = &config.working_directory {
@@ -486,42 +674,63 @@ fn handle_event(
     data_stream: &Option<String>,
     pid: Option<u32>,
     event: &mut Event,
+    log_namespace: LogNamespace,
 ) {
     if let Event::Log(log) = event {
-        // Add timestamp
-        log.try_insert(log_schema().timestamp_key(), Utc::now());
-
-        // Add source type
-        log.try_insert(log_schema().source_type_key(), Bytes::from(EXEC));
+        log_namespace.insert_standard_vector_source_metadata(log, ExecConfig::NAME, Utc::now());
 
         // Add data stream of stdin or stderr (if needed)
         if let Some(data_stream) = data_stream {
-            log.try_insert_flat(STREAM_KEY, data_stream.clone());
+            log_namespace.insert_source_metadata(
+                ExecConfig::NAME,
+                log,
+                Some(LegacyKey::InsertIfEmpty(path!(STREAM_KEY))),
+                path!(STREAM_KEY),
+                data_stream.clone(),
+            );
         }
 
         // Add pid (if needed)
         if let Some(pid) = pid {
-            log.try_insert_flat(PID_KEY, pid as i64);
+            log_namespace.insert_source_metadata(
+                ExecConfig::NAME,
+                log,
+                Some(LegacyKey::InsertIfEmpty(path!(PID_KEY))),
+                path!(PID_KEY),
+                pid as i64,
+            );
         }
 
         // Add hostname (if needed)
         if let Some(hostname) = hostname {
-            log.try_insert(log_schema().host_key(), hostname.clone());
+            log_namespace.insert_source_metadata(
+                ExecConfig::NAME,
+                log,
+                log_schema().host_key().map(LegacyKey::InsertIfEmpty),
+                path!("host"),
+                hostname.clone(),
+            );
         }
 
         // Add command
-        log.try_insert_flat(COMMAND_KEY, config.command.clone());
+        log_namespace.insert_source_metadata(
+            ExecConfig::NAME,
+            log,
+            Some(LegacyKey::InsertIfEmpty(path!(COMMAND_KEY))),
+            path!(COMMAND_KEY),
+            config.command.clone(),
+        );
     }
 }
 
 fn spawn_reader_thread<R: 'static + AsyncRead + Unpin + std::marker::Send>(
     reader: BufReader<R>,
-    decoder: codecs::Decoder,
+    decoder: Decoder,
     origin: &'static str,
     sender: Sender<((SmallVec<[Event; 1]>, usize), &'static str)>,
 ) {
     // Start the green background thread for collecting
-    let _ = Box::pin(tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         debug!("Start capturing {} command output.", origin);
 
         let mut stream = FramedRead::new(reader, decoder);
@@ -531,7 +740,7 @@ fn spawn_reader_thread<R: 'static + AsyncRead + Unpin + std::marker::Send>(
                     if sender.send((next, origin)).await.is_err() {
                         // If the receive half of the channel is closed, either due to close being
                         // called or the Receiver handle dropping, the function returns an error.
-                        debug!("Receive channel closed, unable to send.");
+                        emit!(ExecChannelClosedError);
                         break;
                     }
                 }
@@ -547,190 +756,4 @@ fn spawn_reader_thread<R: 'static + AsyncRead + Unpin + std::marker::Send>(
 
         debug!("Finished capturing {} command output.", origin);
     }));
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Cursor;
-
-    #[cfg(not(target_os = "windows"))]
-    use futures::task::Poll;
-
-    use super::*;
-    use crate::test_util::trace_init;
-
-    #[test]
-    fn test_generate_config() {
-        crate::test_util::test_generate_config::<ExecConfig>();
-    }
-
-    #[test]
-    fn test_scheduled_handle_event() {
-        let config = standard_scheduled_test_config();
-        let hostname = Some("Some.Machine".to_string());
-        let data_stream = Some(STDOUT.to_string());
-        let pid = Some(8888_u32);
-
-        let mut event = Bytes::from("hello world").into();
-        handle_event(&config, &hostname, &data_stream, pid, &mut event);
-        let log = event.as_log();
-
-        assert_eq!(log[log_schema().host_key()], "Some.Machine".into());
-        assert_eq!(log[STREAM_KEY], STDOUT.into());
-        assert_eq!(log[PID_KEY], (8888_i64).into());
-        assert_eq!(log[COMMAND_KEY], config.command.into());
-        assert_eq!(log[log_schema().message_key()], "hello world".into());
-        assert_eq!(log[log_schema().source_type_key()], "exec".into());
-        assert!(log.get(log_schema().timestamp_key()).is_some());
-    }
-
-    #[test]
-    fn test_streaming_create_event() {
-        let config = standard_streaming_test_config();
-        let hostname = Some("Some.Machine".to_string());
-        let data_stream = Some(STDOUT.to_string());
-        let pid = Some(8888_u32);
-
-        let mut event = Bytes::from("hello world").into();
-        handle_event(&config, &hostname, &data_stream, pid, &mut event);
-        let log = event.as_log();
-
-        assert_eq!(log[log_schema().host_key()], "Some.Machine".into());
-        assert_eq!(log[STREAM_KEY], STDOUT.into());
-        assert_eq!(log[PID_KEY], (8888_i64).into());
-        assert_eq!(log[COMMAND_KEY], config.command.into());
-        assert_eq!(log[log_schema().message_key()], "hello world".into());
-        assert_eq!(log[log_schema().source_type_key()], "exec".into());
-        assert!(log.get(log_schema().timestamp_key()).is_some());
-    }
-
-    #[test]
-    fn test_build_command() {
-        let config = ExecConfig {
-            mode: Mode::Streaming,
-            scheduled: None,
-            streaming: Some(StreamingConfig {
-                respawn_on_exit: default_respawn_on_exit(),
-                respawn_interval_secs: default_respawn_interval_secs(),
-            }),
-            command: vec!["./runner".to_owned(), "arg1".to_owned(), "arg2".to_owned()],
-            working_directory: Some(PathBuf::from("/tmp")),
-            include_stderr: default_include_stderr(),
-            maximum_buffer_size_bytes: default_maximum_buffer_size(),
-            framing: default_framing_stream_based(),
-            decoding: default_decoding(),
-        };
-
-        let command = build_command(&config);
-
-        let mut expected_command = Command::new("./runner");
-        expected_command.kill_on_drop(true);
-        expected_command.current_dir("/tmp");
-        expected_command.args(vec!["arg1".to_owned(), "arg2".to_owned()]);
-
-        // Unfortunately the current_dir is not included in the formatted string
-        let expected_command_string = format!("{:?}", expected_command);
-        let command_string = format!("{:?}", command);
-
-        assert_eq!(expected_command_string, command_string);
-    }
-
-    #[tokio::test]
-    async fn test_spawn_reader_thread() {
-        trace_init();
-
-        let buf = Cursor::new("hello world\nhello rocket 🚀");
-        let reader = BufReader::new(buf);
-        let decoder = codecs::Decoder::default();
-        let (sender, mut receiver) = channel(1024);
-
-        spawn_reader_thread(reader, decoder, STDOUT, sender);
-
-        let mut counter = 0;
-        if let Some(((events, byte_size), origin)) = receiver.recv().await {
-            assert_eq!(byte_size, 11);
-            assert_eq!(events.len(), 1);
-            let log = events[0].as_log();
-            assert_eq!(
-                log[log_schema().message_key()],
-                Bytes::from("hello world").into()
-            );
-            assert_eq!(origin, STDOUT);
-            counter += 1;
-        }
-
-        if let Some(((events, byte_size), origin)) = receiver.recv().await {
-            assert_eq!(byte_size, 17);
-            assert_eq!(events.len(), 1);
-            let log = events[0].as_log();
-            assert_eq!(
-                log[log_schema().message_key()],
-                Bytes::from("hello rocket 🚀").into()
-            );
-            assert_eq!(origin, STDOUT);
-            counter += 1;
-        }
-
-        assert_eq!(counter, 2);
-    }
-
-    #[tokio::test]
-    #[cfg(not(target_os = "windows"))]
-    async fn test_run_command_linux() {
-        trace_init();
-        let config = standard_scheduled_test_config();
-        let hostname = Some("Some.Machine".to_string());
-        let decoder = Default::default();
-        let shutdown = ShutdownSignal::noop();
-        let (tx, mut rx) = SourceSender::new_test();
-
-        // Wait for our task to finish, wrapping it in a timeout
-        let timeout = tokio::time::timeout(
-            time::Duration::from_secs(5),
-            run_command(config.clone(), hostname, decoder, shutdown, tx),
-        );
-
-        let timeout_result = timeout.await;
-
-        let exit_status = timeout_result
-            .expect("command timed out")
-            .expect("command error");
-        assert_eq!(0_i32, exit_status.unwrap().code().unwrap());
-
-        if let Poll::Ready(Some(event)) = futures::poll!(rx.next()) {
-            let log = event.as_log();
-            assert_eq!(log[COMMAND_KEY], config.command.clone().into());
-            assert_eq!(log[STREAM_KEY], STDOUT.into());
-            assert_eq!(log[log_schema().source_type_key()], "exec".into());
-            assert_eq!(log[log_schema().message_key()], "Hello World!".into());
-            assert_eq!(log[log_schema().host_key()], "Some.Machine".into());
-            assert!(log.get(PID_KEY).is_some());
-            assert!(log.get(log_schema().timestamp_key()).is_some());
-
-            assert_eq!(8, log.all_fields().count());
-        } else {
-            panic!("Expected to receive a linux event");
-        }
-    }
-
-    fn standard_scheduled_test_config() -> ExecConfig {
-        Default::default()
-    }
-
-    fn standard_streaming_test_config() -> ExecConfig {
-        ExecConfig {
-            mode: Mode::Streaming,
-            scheduled: None,
-            streaming: Some(StreamingConfig {
-                respawn_on_exit: default_respawn_on_exit(),
-                respawn_interval_secs: default_respawn_interval_secs(),
-            }),
-            command: vec!["yes".to_owned()],
-            working_directory: None,
-            include_stderr: default_include_stderr(),
-            maximum_buffer_size_bytes: default_maximum_buffer_size(),
-            framing: default_framing_stream_based(),
-            decoding: default_decoding(),
-        }
-    }
 }

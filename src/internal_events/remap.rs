@@ -1,52 +1,60 @@
-// ## skip check-events ##
-
 use metrics::counter;
-use vector_core::internal_event::InternalEvent;
+use vector_lib::internal_event::InternalEvent;
+use vector_lib::internal_event::{
+    error_stage, error_type, ComponentEventsDropped, INTENTIONAL, UNINTENTIONAL,
+};
 
 #[derive(Debug)]
 pub struct RemapMappingError {
     /// If set to true, the remap transform has dropped the event after a failed
-    /// mapping. This internal event will reflect that in its messaging.
+    /// mapping. This internal event reflects that in its messaging.
     pub event_dropped: bool,
     pub error: String,
 }
 
 impl InternalEvent for RemapMappingError {
-    fn emit_logs(&self) {
-        let message = if self.event_dropped {
-            "Mapping failed with event; discarding event."
-        } else {
-            "Mapping failed with event."
-        };
-
-        warn!(
-            message,
+    fn emit(self) {
+        error!(
+            message = "Mapping failed with event.",
             error = ?self.error,
-            internal_log_rate_secs = 30
+            error_type = error_type::CONVERSION_FAILED,
+            stage = error_stage::PROCESSING,
+            internal_log_rate_limit = true,
+        );
+        counter!(
+            "component_errors_total",
+            "error_type" => error_type::CONVERSION_FAILED,
+            "stage" => error_stage::PROCESSING,
         )
-    }
-
-    fn emit_metrics(&self) {
-        counter!("processing_errors_total", 1,
-                 "error_type" => "failed_mapping");
+        .increment(1);
+        if self.event_dropped {
+            emit!(ComponentEventsDropped::<UNINTENTIONAL> {
+                count: 1,
+                reason: "Mapping failed with event.",
+            });
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct RemapMappingAbort {
     /// If set to true, the remap transform has dropped the event after an abort
-    /// during mapping. This internal event will reflect that in its messaging.
+    /// during mapping. This internal event reflects that in its messaging.
     pub event_dropped: bool,
 }
 
 impl InternalEvent for RemapMappingAbort {
-    fn emit_logs(&self) {
-        let message = if self.event_dropped {
-            "Event mapping aborted; discarding event."
-        } else {
-            "Event mapping aborted."
-        };
+    fn emit(self) {
+        debug!(
+            message = "Event mapping aborted.",
+            internal_log_rate_limit = true
+        );
 
-        debug!(message, internal_log_rate_secs = 30)
+        if self.event_dropped {
+            emit!(ComponentEventsDropped::<INTENTIONAL> {
+                count: 1,
+                reason: "Event mapping aborted.",
+            });
+        }
     }
 }

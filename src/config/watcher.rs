@@ -1,12 +1,10 @@
 use std::{path::PathBuf, time::Duration};
-#[cfg(unix)]
 use std::{
     sync::mpsc::{channel, Receiver},
     thread,
 };
 
-#[cfg(unix)]
-use notify::{raw_watcher, Op, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{recommended_watcher, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::Error;
 
@@ -17,18 +15,16 @@ use crate::Error;
 ///  - Invalid config, caused either by user or by data race.
 ///  - Frequent changes, caused by user/editor modifying/saving file in small chunks.
 /// so we can use smaller, more responsive delay.
-#[cfg(unix)]
 const CONFIG_WATCH_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-#[cfg(unix)]
 const RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Triggers SIGHUP when file on config_path changes.
+/// Sends a ReloadFromDisk on config_path changes.
 /// Accumulates file changes until no change for given duration has occurred.
 /// Has best effort guarantee of detecting all file changes from the end of
 /// this function until the main thread stops.
-#[cfg(unix)]
 pub fn spawn_thread<'a>(
+    signal_tx: crate::signal::SignalTx,
     config_paths: impl IntoIterator<Item = &'a PathBuf> + 'a,
     delay: impl Into<Option<Duration>>,
 ) -> Result<(), Error> {
@@ -43,12 +39,17 @@ pub fn spawn_thread<'a>(
 
     thread::spawn(move || loop {
         if let Some((mut watcher, receiver)) = watcher.take() {
-            while let Ok(RawEvent { op: Ok(event), .. }) = receiver.recv() {
-                if event.intersects(Op::CREATE | Op::REMOVE | Op::WRITE | Op::CLOSE_WRITE) {
+            while let Ok(Ok(event)) = receiver.recv() {
+                if matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(_)
+                ) {
                     debug!(message = "Configuration file change detected.", event = ?event);
 
                     // Consume events until delay amount of time has passed since the latest event.
-                    while let Ok(..) = receiver.recv_timeout(delay) {}
+                    while receiver.recv_timeout(delay).is_ok() {}
+
+                    debug!(message = "Consumed file change events for delay.", delay = ?delay);
 
                     // We need to read paths to resolve any inode changes that may have happened.
                     // And we need to do it before raising sighup to avoid missing any change.
@@ -57,8 +58,12 @@ pub fn spawn_thread<'a>(
                         break;
                     }
 
+                    debug!(message = "Reloaded paths.");
+
                     info!("Configuration file changed.");
-                    raise_sighup();
+                    _ = signal_tx.send(crate::signal::SignalTo::ReloadFromDisk).map_err(|error| {
+                        error!(message = "Unable to reload configuration file. Restart Vector to reload it.", cause = %error)
+                    });
                 } else {
                     debug!(message = "Ignoring event.", event = ?event)
                 }
@@ -76,65 +81,56 @@ pub fn spawn_thread<'a>(
             // so for a good measure raise SIGHUP and let reload logic
             // determine if anything changed.
             info!("Speculating that configuration files have changed.");
-            raise_sighup();
+            _ = signal_tx.send(crate::signal::SignalTo::ReloadFromDisk).map_err(|error| {
+                error!(message = "Unable to reload configuration file. Restart Vector to reload it.", cause = %error)
+            });
         }
     });
 
     Ok(())
 }
 
-#[cfg(windows)]
-/// Errors on Windows.
-pub fn spawn_thread<'a>(
-    _config_paths: impl IntoIterator<Item = &'a PathBuf> + 'a,
-    _delay: impl Into<Option<Duration>>,
-) -> Result<(), Error> {
-    Err("Reloading config on Windows isn't currently supported. Related issue https://github.com/timberio/vector/issues/938 .".into())
-}
-
-#[cfg(unix)]
-fn raise_sighup() {
-    use nix::sys::signal;
-    let _ = signal::raise(signal::Signal::SIGHUP).map_err(|error| {
-        error!(message = "Unable to reload configuration file. Restart Vector to reload it.", cause = %error)
-    });
-}
-
-#[cfg(unix)]
 fn create_watcher(
     config_paths: &[PathBuf],
-) -> Result<(RecommendedWatcher, Receiver<RawEvent>), Error> {
+) -> Result<
+    (
+        RecommendedWatcher,
+        Receiver<Result<notify::Event, notify::Error>>,
+    ),
+    Error,
+> {
     info!("Creating configuration file watcher.");
     let (sender, receiver) = channel();
-    let mut watcher = raw_watcher(sender)?;
+    let mut watcher = recommended_watcher(sender)?;
     add_paths(&mut watcher, config_paths)?;
     Ok((watcher, receiver))
 }
 
-#[cfg(unix)]
 fn add_paths(watcher: &mut RecommendedWatcher, config_paths: &[PathBuf]) -> Result<(), Error> {
     for path in config_paths {
-        watcher.watch(path, RecursiveMode::NonRecursive)?;
+        watcher.watch(path, RecursiveMode::Recursive)?;
     }
     Ok(())
 }
 
-#[cfg(all(test, unix, not(target_os = "macos")))] // https://github.com/timberio/vector/issues/5000
+#[cfg(all(test, unix, not(target_os = "macos")))] // https://github.com/vectordotdev/vector/issues/5000
 mod tests {
-    use std::{fs::File, io::Write, time::Duration};
-
-    use tokio::signal::unix::{signal, SignalKind};
-
     use super::*;
-    use crate::test_util::{temp_file, trace_init};
+    use crate::{
+        signal::SignalRx,
+        test_util::{temp_dir, temp_file, trace_init},
+    };
+    use std::{fs::File, io::Write, time::Duration};
+    use tokio::sync::broadcast;
 
-    async fn test(file: &mut File, timeout: Duration) -> bool {
-        let mut signal = signal(SignalKind::hangup()).expect("Signal handlers should not panic.");
-
+    async fn test(file: &mut File, timeout: Duration, mut receiver: SignalRx) -> bool {
         file.write_all(&[0]).unwrap();
         file.sync_all().unwrap();
 
-        tokio::time::timeout(timeout, signal.recv()).await.is_ok()
+        matches!(
+            tokio::time::timeout(timeout, receiver.recv()).await,
+            Ok(Ok(crate::signal::SignalTo::ReloadFromDisk))
+        )
     }
 
     #[tokio::test]
@@ -142,12 +138,16 @@ mod tests {
         trace_init();
 
         let delay = Duration::from_secs(3);
-        let file_path = temp_file();
+        let dir = temp_dir().to_path_buf();
+        let file_path = dir.join("vector.toml");
+
+        std::fs::create_dir(&dir).unwrap();
         let mut file = File::create(&file_path).unwrap();
 
-        let _ = spawn_thread(&[file_path.parent().unwrap().to_path_buf()], delay).unwrap();
+        let (signal_tx, signal_rx) = broadcast::channel(128);
+        spawn_thread(signal_tx, &[dir], delay).unwrap();
 
-        if !test(&mut file, delay * 5).await {
+        if !test(&mut file, delay * 5, signal_rx).await {
             panic!("Test timed out");
         }
     }
@@ -160,14 +160,16 @@ mod tests {
         let file_path = temp_file();
         let mut file = File::create(&file_path).unwrap();
 
-        let _ = spawn_thread(&[file_path], delay).unwrap();
+        let (signal_tx, signal_rx) = broadcast::channel(128);
+        spawn_thread(signal_tx, &[file_path], delay).unwrap();
 
-        if !test(&mut file, delay * 5).await {
+        if !test(&mut file, delay * 5, signal_rx).await {
             panic!("Test timed out");
         }
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn sym_file_update() {
         trace_init();
 
@@ -177,9 +179,30 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         std::os::unix::fs::symlink(&file_path, &sym_file).unwrap();
 
-        let _ = spawn_thread(&[sym_file], delay).unwrap();
+        let (signal_tx, signal_rx) = broadcast::channel(128);
+        spawn_thread(signal_tx, &[sym_file], delay).unwrap();
 
-        if !test(&mut file, delay * 5).await {
+        if !test(&mut file, delay * 5, signal_rx).await {
+            panic!("Test timed out");
+        }
+    }
+
+    #[tokio::test]
+    async fn recursive_directory_file_update() {
+        trace_init();
+
+        let delay = Duration::from_secs(3);
+        let dir = temp_dir().to_path_buf();
+        let sub_dir = dir.join("sources");
+        let file_path = sub_dir.join("input.toml");
+
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let mut file = File::create(&file_path).unwrap();
+
+        let (signal_tx, signal_rx) = broadcast::channel(128);
+        spawn_thread(signal_tx, &[sub_dir], delay).unwrap();
+
+        if !test(&mut file, delay * 5, signal_rx).await {
             panic!("Test timed out");
         }
     }

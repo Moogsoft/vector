@@ -1,72 +1,79 @@
+#![allow(missing_docs)]
+
 use std::{collections::HashMap, fmt, fs::remove_dir_all, path::PathBuf};
 
+use clap::Parser;
 use colored::*;
 use exitcode::ExitCode;
-use structopt::StructOpt;
 
 use crate::{
     config::{self, Config, ConfigDiff},
-    topology::{self, builder::Pieces},
+    extra_context::ExtraContext,
+    topology::{self, builder::TopologyPieces},
 };
 
 const TEMPORARY_DIRECTORY: &str = "validate_tmp";
 
-#[derive(StructOpt, Debug)]
-#[structopt(rename_all = "kebab-case")]
+#[derive(Parser, Debug)]
+#[command(rename_all = "kebab-case")]
 pub struct Opts {
     /// Disables environment checks. That includes component checks and health checks.
-    #[structopt(long)]
-    no_environment: bool,
+    #[arg(long)]
+    pub no_environment: bool,
+
+    /// Disables health checks during validation.
+    #[arg(long)]
+    pub skip_healthchecks: bool,
 
     /// Fail validation on warnings that are probably a mistake in the configuration
     /// or are recommended to be fixed.
-    #[structopt(short, long)]
-    deny_warnings: bool,
+    #[arg(short, long)]
+    pub deny_warnings: bool,
 
     /// Vector config files in TOML format to validate.
-    #[structopt(
-        name = "config-toml",
+    #[arg(
+        id = "config-toml",
         long,
         env = "VECTOR_CONFIG_TOML",
-        use_delimiter(true)
+        value_delimiter(',')
     )]
-    paths_toml: Vec<PathBuf>,
+    pub paths_toml: Vec<PathBuf>,
 
     /// Vector config files in JSON format to validate.
-    #[structopt(
-        name = "config-json",
+    #[arg(
+        id = "config-json",
         long,
         env = "VECTOR_CONFIG_JSON",
-        use_delimiter(true)
+        value_delimiter(',')
     )]
-    paths_json: Vec<PathBuf>,
+    pub paths_json: Vec<PathBuf>,
 
     /// Vector config files in YAML format to validate.
-    #[structopt(
-        name = "config-yaml",
+    #[arg(
+        id = "config-yaml",
         long,
         env = "VECTOR_CONFIG_YAML",
-        use_delimiter(true)
+        value_delimiter(',')
     )]
-    paths_yaml: Vec<PathBuf>,
+    pub paths_yaml: Vec<PathBuf>,
 
     /// Any number of Vector config files to validate.
     /// Format is detected from the file name.
-    /// If none are specified the default config path `/etc/vector/vector.toml`
-    /// will be targeted.
-    #[structopt(env = "VECTOR_CONFIG", use_delimiter(true))]
-    paths: Vec<PathBuf>,
+    /// If none are specified, the default config path `/etc/vector/vector.yaml`
+    /// is targeted.
+    #[arg(env = "VECTOR_CONFIG", value_delimiter(','))]
+    pub paths: Vec<PathBuf>,
 
     /// Read configuration from files in one or more directories.
     /// File format is detected from the file name.
     ///
     /// Files not ending in .toml, .json, .yaml, or .yml will be ignored.
-    #[structopt(
-        name = "config-dir",
-        short = "C",
+    #[arg(
+        id = "config-dir",
+        short = 'C',
         long,
         env = "VECTOR_CONFIG_DIR",
-        use_delimiter(true)
+        value_delimiter(',')
     )]
     pub config_dirs: Vec<PathBuf>,
 }
@@ -117,7 +124,7 @@ pub async fn validate(opts: &Opts, color: bool) -> ExitCode {
     }
 }
 
-fn validate_config(opts: &Opts, fmt: &mut Formatter) -> Option<Config> {
+pub fn validate_config(opts: &Opts, fmt: &mut Formatter) -> Option<Config> {
     // Prepare paths
     let paths = opts.paths_with_formats();
     let paths = if let Some(paths) = config::process_paths(&paths) {
@@ -134,24 +141,18 @@ fn validate_config(opts: &Opts, fmt: &mut Formatter) -> Option<Config> {
         fmt.title(format!("Failed to load {:?}", &paths_list));
         fmt.sub_error(errors);
     };
-    config::init_log_schema(&paths, true)
+    let builder = config::load_builder_from_paths(&paths)
         .map_err(&mut report_error)
         .ok()?;
-    let (builder, load_warnings) = config::load_builder_from_paths(&paths)
-        .map_err(&mut report_error)
-        .ok()?;
+    config::init_log_schema(builder.global.log_schema.clone(), true);
 
     // Build
-    let (config, build_warnings) = builder
+    let (config, warnings) = builder
         .build_with_warnings()
         .map_err(&mut report_error)
         .ok()?;
 
     // Warnings
-    let warnings = load_warnings
-        .into_iter()
-        .chain(build_warnings)
-        .collect::<Vec<_>>();
     if !warnings.is_empty() {
         if opts.deny_warnings {
             report_error(warnings);
@@ -175,16 +176,17 @@ async fn validate_environment(opts: &Opts, config: &Config, fmt: &mut Formatter)
     } else {
         return false;
     };
-
-    validate_healthchecks(opts, config, &diff, &mut pieces, fmt).await
+    opts.skip_healthchecks || validate_healthchecks(opts, config, &diff, &mut pieces, fmt).await
 }
 
 async fn validate_components(
     config: &Config,
     diff: &ConfigDiff,
     fmt: &mut Formatter,
-) -> Option<Pieces> {
-    match topology::builder::build_pieces(config, diff, HashMap::new()).await {
+) -> Option<TopologyPieces> {
+    match topology::TopologyPieces::build(config, diff, HashMap::new(), ExtraContext::default())
+        .await
+    {
         Ok(pieces) => {
             fmt.success("Component configuration");
             Some(pieces)
@@ -201,7 +203,7 @@ async fn validate_healthchecks(
     opts: &Opts,
     config: &Config,
     diff: &ConfigDiff,
-    pieces: &mut Pieces,
+    pieces: &mut TopologyPieces,
     fmt: &mut Formatter,
 ) -> bool {
     if !config.healthchecks.enabled {
@@ -219,11 +221,11 @@ async fn validate_healthchecks(
             fmt.error(error);
         };
 
+        trace!("Healthcheck for {id} starting.");
         match tokio::spawn(healthcheck).await {
             Ok(Ok(_)) => {
                 if config
-                    .sinks
-                    .get(&id)
+                    .sink(&id)
                     .expect("Sink not present")
                     .healthcheck()
                     .enabled
@@ -234,12 +236,13 @@ async fn validate_healthchecks(
                     validated &= !opts.deny_warnings;
                 }
             }
-            Ok(Err(())) => failed(format!("Health check for \"{}\" failed", id)),
+            Ok(Err(e)) => failed(format!("Health check for \"{}\" failed: {}", id, e)),
             Err(error) if error.is_cancelled() => {
                 failed(format!("Health check for \"{}\" was cancelled", id))
             }
             Err(_) => failed(format!("Health check for \"{}\" panicked", id)),
         }
+        trace!("Healthcheck for {id} done.");
     }
 
     validated
@@ -258,7 +261,7 @@ fn create_tmp_directory(config: &mut Config, fmt: &mut Formatter) -> Option<Path
             Some(path)
         }
         Err(error) => {
-            fmt.error(format!("{}", error));
+            fmt.error(error.to_string());
             None
         }
     }
@@ -270,7 +273,7 @@ fn remove_tmp_directory(path: PathBuf) {
     }
 }
 
-struct Formatter {
+pub struct Formatter {
     /// Width of largest printed line
     max_line_width: usize,
     /// Can empty line be printed
@@ -283,22 +286,22 @@ struct Formatter {
 }
 
 impl Formatter {
-    fn new(color: bool) -> Self {
+    pub fn new(color: bool) -> Self {
         Self {
             max_line_width: 0,
             print_space: false,
             error_intro: if color {
-                format!("{}", "x".red())
+                "x".red().to_string()
             } else {
                 "x".to_owned()
             },
             warning_intro: if color {
-                format!("{}", "~".yellow())
+                "~".yellow().to_string()
             } else {
                 "~".to_owned()
             },
             success_intro: if color {
-                format!("{}", "√".green())
+                "√".green().to_string()
             } else {
                 "√".to_owned()
             },
@@ -401,7 +404,7 @@ impl Formatter {
             .as_ref()
             .lines()
             .map(|line| {
-                String::from_utf8_lossy(&strip_ansi_escapes::strip(line).unwrap())
+                String::from_utf8_lossy(&strip_ansi_escapes::strip(line))
                     .chars()
                     .count()
             })
