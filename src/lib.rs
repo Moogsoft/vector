@@ -169,7 +169,7 @@ pub fn vector_version() -> impl std::fmt::Display {
     // _ => built_info::PKG_VERSION.to_string(),
     // };
     // let pkg_version = built_info::VECTOR_VERSION.to_string();
-    "0.39.0".to_string()
+    "0.41.1".to_string()
 }
 
 /// Returns a string containing full version information of the current build.
