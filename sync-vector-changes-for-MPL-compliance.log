@@ -4257,3 +4257,17 @@ Changes not staged for commit:
 	modified:   sync-vector-changes-for-MPL-compliance.log
 
 no changes added to commit (use "git add" and/or "git commit -a")
+Tue May 13 17:04:29 UTC 2025
+On branch release
+Your branch is up to date with 'origin/release'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   scripts/environment/prepare.sh
+	modified:   website/cue/reference/remap/functions/parse_klog.cue
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   sync-vector-changes-for-MPL-compliance.log
+
