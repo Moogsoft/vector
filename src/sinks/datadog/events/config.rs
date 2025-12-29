@@ -1,38 +1,37 @@
-use futures::FutureExt;
 use indoc::indoc;
-use serde::{Deserialize, Serialize};
 use tower::ServiceBuilder;
-use vector_core::config::proxy::ProxyConfig;
+use vector_lib::{config::proxy::ProxyConfig, configurable::configurable_component, schema};
+use vrl::value::Kind;
 
+use super::{
+    service::{DatadogEventsResponse, DatadogEventsService},
+    sink::DatadogEventsSink,
+};
 use crate::{
-    config::{DataType, GenerateConfig, SinkConfig, SinkContext},
+    common::datadog,
+    config::{AcknowledgementsConfig, GenerateConfig, Input, SinkConfig, SinkContext},
     http::HttpClient,
     sinks::{
-        datadog::{
-            events::{
-                service::{DatadogEventsResponse, DatadogEventsService},
-                sink::DatadogEventsSink,
-            },
-            get_api_base_endpoint, get_api_validate_endpoint, healthcheck, Region,
-        },
-        util::{http::HttpStatusRetryLogic, ServiceBuilderExt, TowerRequestConfig},
         Healthcheck, VectorSink,
+        datadog::{DatadogCommonConfig, LocalDatadogCommonConfig},
+        util::{ServiceBuilderExt, TowerRequestConfig, http::HttpStatusRetryLogic},
     },
-    tls::TlsConfig,
+    tls::MaybeTlsSettings,
 };
+use typetag;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+/// Configuration for the `datadog_events` sink.
+#[configurable_component(sink(
+    "datadog_events",
+    "Publish observability events to the Datadog Events API."
+))]
+#[derive(Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DatadogEventsConfig {
-    pub endpoint: Option<String>,
-    // Deprecated, replaced by the site option
-    pub region: Option<Region>,
-    pub site: Option<String>,
-    pub default_api_key: String,
+    #[serde(flatten)]
+    pub dd_common: LocalDatadogCommonConfig,
 
-    // Deprecated, not sure it actually makes sense to allow messing with TLS configuration?
-    pub tls: Option<TlsConfig>,
-
+    #[configurable(derived)]
     #[serde(default)]
     pub request: TowerRequestConfig,
 }
@@ -47,42 +46,32 @@ impl GenerateConfig for DatadogEventsConfig {
 }
 
 impl DatadogEventsConfig {
-    fn get_api_events_endpoint(&self) -> String {
-        let api_base_endpoint =
-            get_api_base_endpoint(self.endpoint.as_ref(), self.site.as_ref(), self.region);
-        format!("{}/api/v1/events", api_base_endpoint)
-    }
-
     fn build_client(&self, proxy: &ProxyConfig) -> crate::Result<HttpClient> {
-        let client = HttpClient::new(None, proxy)?;
+        let tls = MaybeTlsSettings::from_config(self.dd_common.tls.as_ref(), false)?;
+        let client = HttpClient::new(tls, proxy)?;
         Ok(client)
     }
 
-    fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
-        let validate_endpoint =
-            get_api_validate_endpoint(self.endpoint.as_ref(), self.site.as_ref(), self.region)?;
-        Ok(healthcheck(client, validate_endpoint, self.default_api_key.clone()).boxed())
-    }
-
-    fn build_sink(&self, client: HttpClient, cx: SinkContext) -> crate::Result<VectorSink> {
+    fn build_sink(
+        &self,
+        dd_common: &DatadogCommonConfig,
+        client: HttpClient,
+    ) -> crate::Result<VectorSink> {
         let service = DatadogEventsService::new(
-            self.get_api_events_endpoint(),
-            self.default_api_key.clone(),
+            dd_common.get_api_endpoint("/api/v1/events")?,
+            dd_common.default_api_key.clone(),
             client,
         );
 
         let request_opts = self.request;
-        let request_settings = request_opts.unwrap_with(&TowerRequestConfig::default());
+        let request_settings = request_opts.into_settings();
         let retry_logic = HttpStatusRetryLogic::new(|req: &DatadogEventsResponse| req.http_status);
 
         let service = ServiceBuilder::new()
             .settings(request_settings, retry_logic)
             .service(service);
 
-        let sink = DatadogEventsSink {
-            service,
-            acker: cx.acker(),
-        };
+        let sink = DatadogEventsSink { service };
 
         Ok(VectorSink::from_event_streamsink(sink))
     }
@@ -93,18 +82,25 @@ impl DatadogEventsConfig {
 impl SinkConfig for DatadogEventsConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let client = self.build_client(cx.proxy())?;
-        let healthcheck = self.build_healthcheck(client.clone())?;
-        let sink = self.build_sink(client, cx)?;
+        let global = cx.extra_context.get_or_default::<datadog::Options>();
+        let dd_common = self.dd_common.with_globals(global)?;
+        let healthcheck = dd_common.build_healthcheck(client.clone())?;
+        let sink = self.build_sink(&dd_common, client)?;
 
         Ok((sink, healthcheck))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Log
+    fn input(&self) -> Input {
+        let requirement = schema::Requirement::empty()
+            .required_meaning("message", Kind::bytes())
+            .optional_meaning("host", Kind::bytes())
+            .optional_meaning("timestamp", Kind::timestamp());
+
+        Input::log().with_schema_requirement(requirement)
     }
 
-    fn sink_type(&self) -> &'static str {
-        "datadog_events"
+    fn acknowledgements(&self) -> &AcknowledgementsConfig {
+        &self.dd_common.acknowledgements
     }
 }
 

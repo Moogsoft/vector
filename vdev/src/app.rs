@@ -1,14 +1,17 @@
-use std::ffi::{OsStr, OsString};
-pub use std::process::Command;
 use std::{
-    borrow::Cow, env, io::Read, path::PathBuf, process::ExitStatus, process::Stdio, sync::OnceLock,
+    borrow::Cow,
+    env,
+    ffi::{OsStr, OsString},
+    io::Read,
+    path::PathBuf,
+    process::{Command, ExitStatus, Stdio},
+    sync::{LazyLock, OnceLock},
     time::Duration,
 };
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::LevelFilter;
-use once_cell::sync::Lazy;
 
 use crate::{config::Config, git, platform, util};
 
@@ -23,8 +26,8 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 
 // Extract the shell from the environment variable `$SHELL` and substitute the above default value
 // if it isn't set.
-pub static SHELL: Lazy<OsString> =
-    Lazy::new(|| (env::var_os("SHELL").unwrap_or_else(|| DEFAULT_SHELL.into())));
+pub static SHELL: LazyLock<OsString> =
+    LazyLock::new(|| (env::var_os("SHELL").unwrap_or_else(|| DEFAULT_SHELL.into())));
 
 static VERBOSITY: OnceLock<LevelFilter> = OnceLock::new();
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -64,7 +67,9 @@ pub fn version() -> Result<String> {
         }
         let tag = String::from_utf8_lossy(&head.stdout).trim().to_string();
         if tag != format!("v{version}") {
-            bail!("On latest release channel and tag {tag:?} is different from Cargo.toml {version:?}. Aborting");
+            bail!(
+                "On latest release channel and tag {tag:?} is different from Cargo.toml {version:?}. Aborting"
+            );
         }
         // use '.' instead of '-' or '_' to avoid issues with rpm and deb package naming
         // format requirements.

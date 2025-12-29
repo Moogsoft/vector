@@ -1,18 +1,31 @@
-use serde::{Deserialize, Serialize};
+use vector_lib::{
+    config::{LogNamespace, clone_input_definitions},
+    configurable::configurable_component,
+    internal_event::{Count, InternalEventHandle as _, Registered},
+};
 
 use crate::{
     conditions::{AnyCondition, Condition},
     config::{
-        DataType, GenerateConfig, Output, TransformConfig, TransformContext, TransformDescription,
+        DataType, GenerateConfig, Input, OutputId, TransformConfig, TransformContext,
+        TransformOutput,
     },
     event::Event,
-    internal_events::FilterEventDiscarded,
+    internal_events::FilterEventsDropped,
+    schema,
     transforms::{FunctionTransform, OutputBuffer, Transform},
 };
+use typetag;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// Configuration for the `filter` transform.
+#[configurable_component(transform("filter", "Filter events based on a set of conditions."))]
+#[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FilterConfig {
+    #[configurable(derived)]
+    /// The condition that every input event is matched against.
+    ///
+    /// If an event is matched by the condition, it is forwarded. Otherwise, the event is dropped.
     condition: AnyCondition,
 }
 
@@ -22,17 +35,9 @@ impl From<AnyCondition> for FilterConfig {
     }
 }
 
-inventory::submit! {
-    TransformDescription::new::<FilterConfig>("filter")
-}
-
 impl GenerateConfig for FilterConfig {
     fn generate_config() -> toml::Value {
-        toml::from_str(
-            r#"condition.type = "check_fields"
-            condition."message.eq" = "value""#,
-        )
-        .unwrap()
+        toml::from_str(r#"condition = ".message == \"value\"""#).unwrap()
     }
 }
 
@@ -45,53 +50,71 @@ impl TransformConfig for FilterConfig {
         )))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Any
+    fn input(&self) -> Input {
+        Input::all()
     }
 
-    fn outputs(&self) -> Vec<Output> {
-        vec![Output::default(DataType::Any)]
+    fn outputs(
+        &self,
+        _enrichment_tables: vector_lib::enrichment::TableRegistry,
+        input_definitions: &[(OutputId, schema::Definition)],
+        _: LogNamespace,
+    ) -> Vec<TransformOutput> {
+        vec![TransformOutput::new(
+            DataType::all_bits(),
+            clone_input_definitions(input_definitions),
+        )]
     }
 
     fn enable_concurrency(&self) -> bool {
         true
     }
-
-    fn transform_type(&self) -> &'static str {
-        "filter"
-    }
 }
 
-#[derive(Derivative, Clone)]
-#[derivative(Debug)]
+#[derive(Clone)]
 pub struct Filter {
-    #[derivative(Debug = "ignore")]
-    condition: Box<dyn Condition>,
+    condition: Condition,
+    events_dropped: Registered<FilterEventsDropped>,
 }
 
 impl Filter {
-    pub fn new(condition: Box<dyn Condition>) -> Self {
-        Self { condition }
+    pub fn new(condition: Condition) -> Self {
+        Self {
+            condition,
+            events_dropped: register!(FilterEventsDropped),
+        }
     }
 }
 
 impl FunctionTransform for Filter {
     fn transform(&mut self, output: &mut OutputBuffer, event: Event) {
-        if self.condition.check(&event) {
+        let (result, event) = self.condition.check(event);
+        if result {
             output.push(event);
         } else {
-            emit!(&FilterEventDiscarded);
+            self.events_dropped.emit(Count(1));
         }
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+    use vector_lib::{
+        config::ComponentKey,
+        event::{Metric, MetricKind, MetricValue},
+    };
+
     use super::*;
     use crate::{
-        conditions::{is_log::IsLogConfig, ConditionConfig},
-        event::Event,
-        transforms::test::transform_one,
+        conditions::ConditionConfig,
+        config::schema::Definition,
+        event::{Event, LogEvent},
+        test_util::components::assert_transform_compliance,
+        transforms::test::create_topology,
     };
 
     #[test]
@@ -99,14 +122,36 @@ mod test {
         crate::test_util::test_generate_config::<super::FilterConfig>();
     }
 
-    #[test]
-    fn passes_metadata() {
-        let mut filter = Filter {
-            condition: IsLogConfig {}.build(&Default::default()).unwrap(),
-        };
-        let event = Event::from("message");
-        let metadata = event.metadata().clone();
-        let result = transform_one(&mut filter, event).unwrap();
-        assert_eq!(result.metadata(), &metadata);
+    #[tokio::test]
+    async fn filter_basic() {
+        assert_transform_compliance(async {
+            let transform_config = FilterConfig::from(AnyCondition::from(ConditionConfig::IsLog));
+
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) =
+                create_topology(ReceiverStream::new(rx), transform_config).await;
+
+            let mut log = Event::from(LogEvent::from("message"));
+            tx.send(log.clone()).await.unwrap();
+
+            log.set_source_id(Arc::new(ComponentKey::from("in")));
+            log.set_upstream_id(Arc::new(OutputId::from("transform")));
+            log.metadata_mut()
+                .set_schema_definition(&Arc::new(Definition::default_legacy_namespace()));
+
+            assert_eq!(out.recv().await.unwrap(), log);
+
+            let metric = Event::from(Metric::new(
+                "test metric",
+                MetricKind::Incremental,
+                MetricValue::Counter { value: 1.0 },
+            ));
+            tx.send(metric).await.unwrap();
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+        .await;
     }
 }

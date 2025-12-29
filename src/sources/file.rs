@@ -6,29 +6,31 @@ use futures::{FutureExt, Stream, StreamExt, TryFutureExt};
 use regex::bytes::Regex;
 use serde_with::serde_as;
 use snafu::{ResultExt, Snafu};
-use tokio::{sync::oneshot, task::spawn_blocking};
+use tokio::sync::oneshot;
 use tracing::{Instrument, Span};
-use vector_lib::codecs::{BytesDeserializer, BytesDeserializerConfig};
-use vector_lib::configurable::configurable_component;
-use vector_lib::file_source::{
-    calculate_ignore_before,
-    paths_provider::glob::{Glob, MatchOptions},
-    Checkpointer, FileFingerprint, FileServer, FingerprintStrategy, Fingerprinter, Line, ReadFrom,
-    ReadFromConfig,
-};
-use vector_lib::finalizer::OrderedFinalizer;
-use vector_lib::lookup::{lookup_v2::OptionalValuePath, owned_value_path, path, OwnedValuePath};
 use vector_lib::{
-    config::{LegacyKey, LogNamespace},
     EstimatedJsonEncodedSizeOf,
+    codecs::{BytesDeserializer, BytesDeserializerConfig},
+    config::{LegacyKey, LogNamespace},
+    configurable::configurable_component,
+    file_source::{
+        file_server::{FileServer, Line, calculate_ignore_before},
+        paths_provider::{Glob, MatchOptions},
+    },
+    file_source_common::{
+        Checkpointer, FileFingerprint, FingerprintStrategy, Fingerprinter, ReadFrom, ReadFromConfig,
+    },
+    finalizer::OrderedFinalizer,
+    lookup::{OwnedValuePath, lookup_v2::OptionalValuePath, owned_value_path, path},
 };
 use vrl::value::Kind;
 
 use super::util::{EncodingConfig, MultilineConfig};
 use crate::{
+    SourceSender,
     config::{
-        log_schema, DataType, SourceAcknowledgementsConfig, SourceConfig, SourceContext,
-        SourceOutput,
+        DataType, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
+        log_schema,
     },
     encoding_transcode::{Decoder, Encoder},
     event::{BatchNotifier, BatchStatus, LogEvent},
@@ -39,8 +41,8 @@ use crate::{
     line_agg::{self, LineAgg},
     serde::bool_or_struct,
     shutdown::ShutdownSignal,
-    SourceSender,
 };
+use typetag;
 
 #[derive(Debug, Snafu)]
 enum BuildError {
@@ -298,6 +300,8 @@ pub enum FingerprintConfig {
         bytes: Option<usize>,
 
         /// The number of bytes to skip ahead (or ignore) when reading the data used for generating the checksum.
+        /// If the file is compressed, the number of bytes refer to the header in the uncompressed content. Only
+        /// gzip is supported at this time.
         ///
         /// This can be helpful if all files share a common header that should be skipped.
         #[serde(default = "default_ignored_header_bytes")]
@@ -306,7 +310,8 @@ pub enum FingerprintConfig {
 
         /// The number of lines to read for generating the checksum.
         ///
-        /// If your files share a common header that is not always a fixed size,
+        /// The number of lines are determined from the uncompressed content if the file is compressed. Only
+        /// gzip is supported at this time.
         ///
         /// If the file has less than this amount of lines, it won’t be read at all.
         #[serde(default = "default_lines")]
@@ -349,7 +354,9 @@ impl From<FingerprintConfig> for FingerprintStrategy {
             } => {
                 let bytes = match bytes {
                     Some(bytes) => {
-                        warn!(message = "The `fingerprint.bytes` option will be used to convert old file fingerprints created by vector < v0.11.0, but are not supported for new file fingerprints. The first line will be used instead.");
+                        warn!(
+                            message = "The `fingerprint.bytes` option will be used to convert old file fingerprints created by vector < v0.11.0, but are not supported for new file fingerprints. The first line will be used instead."
+                        );
                         bytes
                     }
                     None => 256,
@@ -564,7 +571,6 @@ pub fn file_source(
         oldest_first: config.oldest_first,
         remove_after: config.remove_after_secs.map(Duration::from_secs),
         emitter,
-        handle: tokio::runtime::Handle::current(),
         rotate_wait: config.rotate_wait,
     };
 
@@ -699,14 +705,16 @@ pub fn file_source(
         });
 
         let span = info_span!("file_server");
-        spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _enter = span.enter();
-            let result = file_server.run(tx, shutdown, shutdown_checkpointer, checkpointer);
+            let rt = tokio::runtime::Handle::current();
+            let result =
+                rt.block_on(file_server.run(tx, shutdown, shutdown_checkpointer, checkpointer));
             emit!(FileOpen { count: 0 });
             // Panic if we encounter any error originating from the file server.
             // We're at the `spawn_blocking` call, the panic will be caught and
             // passed to the `JoinHandle` error, similar to the usual threads.
-            result.unwrap();
+            result.expect("file server exited with an error");
         })
         .map_err(|error| error!(message="File server unexpectedly stopped.", %error))
         .await
@@ -721,7 +729,9 @@ fn reconcile_position_options(
     read_from: Option<ReadFromConfig>,
 ) -> (bool, ReadFrom) {
     if start_at_beginning.is_some() {
-        warn!(message = "Use of deprecated option `start_at_beginning`. Please use `ignore_checkpoints` and `read_from` options instead.")
+        warn!(
+            message = "Use of deprecated option `start_at_beginning`. Please use `ignore_checkpoints` and `read_from` options instead."
+        )
     }
 
     match start_at_beginning {
@@ -849,9 +859,9 @@ mod tests {
     use encoding_rs::UTF_16LE;
     use similar_asserts::assert_eq;
     use tempfile::tempdir;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
     use vector_lib::schema::Definition;
-    use vrl::value::kind::Collection;
+    use vrl::{value, value::kind::Collection};
 
     use super::*;
     use crate::{
@@ -859,9 +869,8 @@ mod tests {
         event::{Event, EventStatus, Value},
         shutdown::ShutdownSignal,
         sources::file,
-        test_util::components::{assert_source_compliance, FILE_SOURCE_TAGS},
+        test_util::components::{FILE_SOURCE_TAGS, assert_source_compliance},
     };
-    use vrl::value;
 
     #[test]
     fn generate_config() {
@@ -975,7 +984,7 @@ mod tests {
         let local_dir = tempdir().unwrap();
 
         let mut config = Config::default();
-        config.global.data_dir = global_dir.into_path().into();
+        config.global.data_dir = global_dir.keep().into();
 
         // local path given -- local should win
         let res = config
@@ -1125,12 +1134,13 @@ mod tests {
                 .unwrap(),
             &value!("file")
         );
-        assert!(log
-            .metadata()
-            .value()
-            .get(path!("vector", "ingest_timestamp"))
-            .unwrap()
-            .is_timestamp());
+        assert!(
+            log.metadata()
+                .value()
+                .get(path!("vector", "ingest_timestamp"))
+                .unwrap()
+                .is_timestamp()
+        );
 
         assert_eq!(
             log.metadata()
@@ -1175,8 +1185,8 @@ mod tests {
             sleep_500_millis().await; // The files must be observed at their original lengths before writing to them
 
             for i in 0..n {
-                writeln!(&mut file1, "hello {}", i).unwrap();
-                writeln!(&mut file2, "goodbye {}", i).unwrap();
+                writeln!(&mut file1, "hello {i}").unwrap();
+                writeln!(&mut file2, "goodbye {i}").unwrap();
             }
 
             sleep_500_millis().await;
@@ -1255,7 +1265,7 @@ mod tests {
             sleep_500_millis().await; // The files must be observed at its original length before writing to it
 
             for i in 0..n {
-                writeln!(&mut file, "pretrunc {}", i).unwrap();
+                writeln!(&mut file, "pretrunc {i}").unwrap();
             }
 
             sleep_500_millis().await; // The writes must be observed before truncating
@@ -1266,7 +1276,7 @@ mod tests {
             sleep_500_millis().await; // The truncate must be observed before writing again
 
             for i in 0..n {
-                writeln!(&mut file, "posttrunc {}", i).unwrap();
+                writeln!(&mut file, "posttrunc {i}").unwrap();
             }
 
             sleep_500_millis().await;
@@ -1317,7 +1327,7 @@ mod tests {
             sleep_500_millis().await; // The files must be observed at its original length before writing to it
 
             for i in 0..n {
-                writeln!(&mut file, "prerot {}", i).unwrap();
+                writeln!(&mut file, "prerot {i}").unwrap();
             }
 
             sleep_500_millis().await; // The writes must be observed before rotating
@@ -1328,7 +1338,7 @@ mod tests {
             sleep_500_millis().await; // The rotation must be observed before writing again
 
             for i in 0..n {
-                writeln!(&mut file, "postrot {}", i).unwrap();
+                writeln!(&mut file, "postrot {i}").unwrap();
             }
 
             sleep_500_millis().await;
@@ -1385,10 +1395,10 @@ mod tests {
             sleep_500_millis().await; // The files must be observed at their original lengths before writing to them
 
             for i in 0..n {
-                writeln!(&mut file1, "1 {}", i).unwrap();
-                writeln!(&mut file2, "2 {}", i).unwrap();
-                writeln!(&mut file3, "3 {}", i).unwrap();
-                writeln!(&mut file4, "4 {}", i).unwrap();
+                writeln!(&mut file1, "1 {i}").unwrap();
+                writeln!(&mut file2, "2 {i}").unwrap();
+                writeln!(&mut file3, "3 {i}").unwrap();
+                writeln!(&mut file4, "4 {i}").unwrap();
             }
 
             sleep_500_millis().await;
@@ -1433,8 +1443,8 @@ mod tests {
             sleep_500_millis().await; // The files must be observed at their original lengths before writing to them
 
             for i in 0..n {
-                writeln!(&mut file1, "1 {}", i).unwrap();
-                writeln!(&mut file2, "2 {}", i).unwrap();
+                writeln!(&mut file1, "1 {i}").unwrap();
+                writeln!(&mut file2, "2 {i}").unwrap();
             }
 
             sleep_500_millis().await;
@@ -1687,8 +1697,9 @@ mod tests {
 
         let line_count = 4000;
         for i in 0..line_count {
-            writeln!(&mut file, "Here's a line for you: {}", i).unwrap();
+            writeln!(&mut file, "Here's a line for you: {i}").unwrap();
         }
+        file.flush().unwrap();
         sleep_500_millis().await;
 
         // First time server runs it should pick up a bunch of lines
@@ -1870,7 +1881,7 @@ mod tests {
             writeln!(&mut file, "this is too long").unwrap();
             writeln!(&mut file, "11 eleven11").unwrap();
             let super_long = "This line is super long and will take up more space than BufReader's internal buffer, just to make sure that everything works properly when multiple read calls are involved".repeat(10000);
-            writeln!(&mut file, "{}", super_long).unwrap();
+            writeln!(&mut file, "{super_long}").unwrap();
             writeln!(&mut file, "exactly 10").unwrap();
             writeln!(&mut file, "it can end on a line that's too long").unwrap();
 
@@ -2329,7 +2340,7 @@ mod tests {
             sleep_500_millis().await; // The files must be observed at their original lengths before writing to them
 
             for i in 0..n {
-                writeln!(&mut file, "{}", i).unwrap();
+                writeln!(&mut file, "{i}").unwrap();
             }
             drop(file);
 
@@ -2358,8 +2369,8 @@ mod tests {
         Unfinalized, // Acknowledgement handling but no finalization
         Acks,        // Full acknowledgements and proper finalization
     }
-    use vector_lib::lookup::OwnedTargetPath;
     use AckingMode::*;
+    use vector_lib::lookup::OwnedTargetPath;
 
     async fn run_file_source(
         config: &FileConfig,

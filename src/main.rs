@@ -1,18 +1,18 @@
 #![deny(warnings)]
 
 extern crate vector;
-use vector::{app::Application, extra_context::ExtraContext};
-
 use std::process::ExitCode;
+
+use vector::{app::Application, extra_context::ExtraContext};
 
 #[cfg(unix)]
 pub fn main() -> ExitCode {
     #[cfg(feature = "allocation-tracing")]
     {
         use std::sync::atomic::Ordering;
-        use vector::internal_telemetry::allocations::{
-            init_allocation_tracing, REPORTING_INTERVAL_MS, TRACK_ALLOCATIONS,
-        };
+        use vector::internal_telemetry::allocations::init_allocation_tracing;
+        use vector::internal_telemetry::allocations::{REPORTING_INTERVAL_MS, TRACK_ALLOCATIONS};
+
         let opts = vector::cli::Opts::get_matches()
             .map_err(|error| {
                 // Printing to stdout/err can itself fail; ignore it.

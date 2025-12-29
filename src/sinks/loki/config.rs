@@ -8,6 +8,7 @@ use crate::{
     schema,
     sinks::{prelude::*, util::UriSerde},
 };
+use typetag;
 
 const fn default_compression() -> Compression {
     Compression::Snappy
@@ -203,7 +204,7 @@ impl GenerateConfig for LokiConfig {
 
 impl LokiConfig {
     pub(super) fn build_client(&self, cx: SinkContext) -> crate::Result<HttpClient> {
-        let tls = TlsSettings::from_options(&self.tls)?;
+        let tls = TlsSettings::from_options(self.tls.as_ref())?;
         let client = HttpClient::new(tls, cx.proxy())?;
         Ok(client)
     }

@@ -1,94 +1,225 @@
-use std::{
-    collections::HashMap,
-    convert::TryFrom,
-    io::{self},
-};
+use std::{collections::HashMap, convert::TryFrom, io};
 
 use bytes::Bytes;
-use chrono::Utc;
-use http::header::{HeaderName, HeaderValue};
+use chrono::{FixedOffset, Utc};
+use http::{
+    Uri,
+    header::{HeaderName, HeaderValue},
+};
 use indoc::indoc;
-use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, Snafu};
 use tower::ServiceBuilder;
 use uuid::Uuid;
-use vector_core::{event::Finalizable, ByteSizeOf};
+use vector_lib::{
+    TimeZone,
+    codecs::encoding::Framer,
+    configurable::configurable_component,
+    event::{EventFinalizers, Finalizable},
+    request_metadata::RequestMetadata,
+};
 
-use super::{GcpAuthConfig, GcpCredentials, Scope};
 use crate::{
-    config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
+    codecs::{Encoder, EncodingConfigWithFraming, SinkType, Transformer},
+    config::{AcknowledgementsConfig, DataType, GenerateConfig, Input, SinkConfig, SinkContext},
     event::Event,
-    http::HttpClient,
-    serde::to_string,
+    gcp::{GcpAuthConfig, GcpAuthenticator, Scope},
+    http::{HttpClient, get_http_scheme_from_uri},
+    serde::json::to_string,
     sinks::{
+        Healthcheck, VectorSink,
         gcs_common::{
             config::{
-                build_healthcheck, GcsPredefinedAcl, GcsRetryLogic, GcsStorageClass,
-                KeyPrefixTemplateSnafu, BASE_URL,
+                GcsPredefinedAcl, GcsRetryLogic, GcsStorageClass, build_healthcheck,
+                default_endpoint,
             },
-            service::{GcsMetadata, GcsRequest, GcsRequestSettings, GcsService},
+            service::{GcsRequest, GcsRequestSettings, GcsService},
             sink::GcsSink,
         },
         util::{
-            batch::BatchConfig,
-            encoding::{EncodingConfig, EncodingConfiguration, StandardEncodings},
-            partitioner::KeyPartitioner,
             BulkSizeBasedDefaultBatchSettings, Compression, RequestBuilder, ServiceBuilderExt,
-            TowerRequestConfig,
+            TowerRequestConfig, batch::BatchConfig, metadata::RequestMetadataBuilder,
+            partitioner::KeyPartitioner, request_builder::EncodeResult,
+            service::TowerRequestConfigDefaults, timezone_to_offset,
         },
-        Healthcheck, VectorSink,
     },
-    template::Template,
-    tls::{TlsOptions, TlsSettings},
+    template::{Template, TemplateParseError},
+    tls::{TlsConfig, TlsSettings},
 };
+use typetag;
 
-const NAME: &str = "gcp_cloud_storage";
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum GcsHealthcheckError {
+    #[snafu(display("key_prefix template parse error: {}", source))]
+    KeyPrefixTemplate { source: TemplateParseError },
+}
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Clone, Copy, Debug)]
+pub struct GcsTowerRequestConfigDefaults;
+
+impl TowerRequestConfigDefaults for GcsTowerRequestConfigDefaults {
+    const RATE_LIMIT_NUM: u64 = 1_000;
+}
+
+/// Configuration for the `gcp_cloud_storage` sink.
+#[configurable_component(sink(
+    "gcp_cloud_storage",
+    "Store observability events in GCP Cloud Storage."
+))]
+#[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct GcsSinkConfig {
+    /// The GCS bucket name.
+    #[configurable(metadata(docs::examples = "my-bucket"))]
     bucket: String,
+
+    /// The Predefined ACL to apply to created objects.
+    ///
+    /// For more information, see [Predefined ACLs][predefined_acls].
+    ///
+    /// [predefined_acls]: https://cloud.google.com/storage/docs/access-control/lists#predefined-acl
     acl: Option<GcsPredefinedAcl>,
+
+    /// The storage class for created objects.
+    ///
+    /// For more information, see the [storage classes][storage_classes] documentation.
+    ///
+    /// [storage_classes]: https://cloud.google.com/storage/docs/storage-classes
     storage_class: Option<GcsStorageClass>,
+
+    /// The set of metadata `key:value` pairs for the created objects.
+    ///
+    /// For more information, see the [custom metadata][custom_metadata] documentation.
+    ///
+    /// [custom_metadata]: https://cloud.google.com/storage/docs/metadata#custom-metadata
+    #[configurable(metadata(docs::additional_props_description = "A key/value pair."))]
+    #[configurable(metadata(docs::advanced))]
     metadata: Option<HashMap<String, String>>,
+
+    /// A prefix to apply to all object keys.
+    ///
+    /// Prefixes are useful for partitioning objects, such as by creating an object key that
+    /// stores objects under a particular directory. If using a prefix for this purpose, it must end
+    /// in `/` in order to act as a directory path. A trailing `/` is **not** automatically added.
+    #[configurable(metadata(docs::templateable))]
+    #[configurable(metadata(
+        docs::examples = "date=%F/",
+        docs::examples = "date=%F/hour=%H/",
+        docs::examples = "year=%Y/month=%m/day=%d/",
+        docs::examples = "application_id={{ application_id }}/date=%F/"
+    ))]
+    #[configurable(metadata(docs::advanced))]
     key_prefix: Option<String>,
-    filename_time_format: Option<String>,
-    filename_append_uuid: Option<bool>,
+
+    /// The timestamp format for the time component of the object key.
+    ///
+    /// By default, object keys are appended with a timestamp that reflects when the objects are
+    /// sent to S3, such that the resulting object key is functionally equivalent to joining the key
+    /// prefix with the formatted timestamp, such as `date=2022-07-18/1658176486`.
+    ///
+    /// This would represent a `key_prefix` set to `date=%F/` and the timestamp of Mon Jul 18 2022
+    /// 20:34:44 GMT+0000, with the `filename_time_format` being set to `%s`, which renders
+    /// timestamps in seconds since the Unix epoch.
+    ///
+    /// Supports the common [`strftime`][chrono_strftime_specifiers] specifiers found in most
+    /// languages.
+    ///
+    /// When set to an empty string, no timestamp is appended to the key prefix.
+    ///
+    /// [chrono_strftime_specifiers]: https://docs.rs/chrono/latest/chrono/format/strftime/index.html#specifiers
+    #[serde(default = "default_time_format")]
+    #[configurable(metadata(docs::advanced))]
+    filename_time_format: String,
+
+    /// Whether or not to append a UUID v4 token to the end of the object key.
+    ///
+    /// The UUID is appended to the timestamp portion of the object key, such that if the object key
+    /// generated is `date=2022-07-18/1658176486`, setting this field to `true` results
+    /// in an object key that looks like `date=2022-07-18/1658176486-30f6652c-71da-4f9f-800d-a1189c47c547`.
+    ///
+    /// This ensures there are no name collisions, and can be useful in high-volume workloads where
+    /// object keys must be unique.
+    #[serde(default = "crate::serde::default_true")]
+    #[configurable(metadata(docs::advanced))]
+    filename_append_uuid: bool,
+
+    /// The filename extension to use in the object key.
+    ///
+    /// If not specified, the extension is determined by the compression scheme used.
+    #[configurable(metadata(docs::advanced))]
     filename_extension: Option<String>,
-    encoding: EncodingConfig<StandardEncodings>,
+
+    #[serde(flatten)]
+    encoding: EncodingConfigWithFraming,
+
+    /// Compression configuration.
+    ///
+    /// All compression algorithms use the default compression level unless otherwise specified.
+    ///
+    /// Some cloud storage API clients and browsers handle decompression transparently, so
+    /// depending on how they are accessed, files may not always appear to be compressed.
+    #[configurable(derived)]
     #[serde(default)]
     compression: Compression,
+
+    #[configurable(derived)]
     #[serde(default)]
     batch: BatchConfig<BulkSizeBasedDefaultBatchSettings>,
+
+    /// API endpoint for Google Cloud Storage
+    #[configurable(metadata(docs::examples = "http://localhost:9000"))]
+    #[configurable(validation(format = "uri"))]
+    #[serde(default = "default_endpoint")]
+    endpoint: String,
+
+    #[configurable(derived)]
     #[serde(default)]
-    request: TowerRequestConfig,
+    request: TowerRequestConfig<GcsTowerRequestConfigDefaults>,
+
     #[serde(flatten)]
     auth: GcpAuthConfig,
-    tls: Option<TlsOptions>,
+
+    #[configurable(derived)]
+    tls: Option<TlsConfig>,
+
+    #[configurable(derived)]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde::bool_or_struct",
+        skip_serializing_if = "crate::serde::is_default"
+    )]
+    acknowledgements: AcknowledgementsConfig,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub timezone: Option<TimeZone>,
+}
+
+fn default_time_format() -> String {
+    "%s".to_string()
 }
 
 #[cfg(test)]
-fn default_config(e: StandardEncodings) -> GcsSinkConfig {
+fn default_config(encoding: EncodingConfigWithFraming) -> GcsSinkConfig {
     GcsSinkConfig {
         bucket: Default::default(),
         acl: Default::default(),
         storage_class: Default::default(),
         metadata: Default::default(),
         key_prefix: Default::default(),
-        filename_time_format: Default::default(),
-        filename_append_uuid: Default::default(),
+        filename_time_format: default_time_format(),
+        filename_append_uuid: true,
         filename_extension: Default::default(),
-        encoding: e.into(),
+        encoding,
         compression: Compression::gzip_default(),
         batch: Default::default(),
+        endpoint: Default::default(),
         request: Default::default(),
         auth: Default::default(),
         tls: Default::default(),
+        acknowledgements: Default::default(),
+        timezone: Default::default(),
     }
-}
-
-inventory::submit! {
-    SinkDescription::new::<GcsSinkConfig>(NAME)
 }
 
 impl GenerateConfig for GcsSinkConfig {
@@ -96,7 +227,8 @@ impl GenerateConfig for GcsSinkConfig {
         toml::from_str(indoc! {r#"
             bucket = "my-bucket"
             credentials_path = "/path/to/credentials.json"
-            encoding.codec = "ndjson"
+            framing.method = "newline_delimited"
+            encoding.codec = "json"
         "#})
         .unwrap()
     }
@@ -106,30 +238,28 @@ impl GenerateConfig for GcsSinkConfig {
 #[typetag::serde(name = "gcp_cloud_storage")]
 impl SinkConfig for GcsSinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        let creds = self
-            .auth
-            .make_credentials(Scope::DevStorageReadWrite)
-            .await?;
-        let base_url = format!("{}{}/", BASE_URL, self.bucket);
-        let tls = TlsSettings::from_options(&self.tls)?;
+        let auth = self.auth.build(Scope::DevStorageReadWrite).await?;
+        let base_url = format!("{}/{}/", self.endpoint, self.bucket);
+        let tls = TlsSettings::from_options(self.tls.as_ref())?;
         let client = HttpClient::new(tls, cx.proxy())?;
         let healthcheck = build_healthcheck(
             self.bucket.clone(),
             client.clone(),
             base_url.clone(),
-            creds.clone(),
+            auth.clone(),
         )?;
-        let sink = self.build_sink(client, base_url, creds, cx)?;
+        auth.spawn_regenerate_token();
+        let sink = self.build_sink(client, base_url, auth, cx)?;
 
         Ok((sink, healthcheck))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Log
+    fn input(&self) -> Input {
+        Input::new(self.encoding.config().1.input_type() & DataType::Log)
     }
 
-    fn sink_type(&self) -> &'static str {
-        NAME
+    fn acknowledgements(&self) -> &AcknowledgementsConfig {
+        &self.acknowledgements
     }
 }
 
@@ -138,25 +268,24 @@ impl GcsSinkConfig {
         &self,
         client: HttpClient,
         base_url: String,
-        creds: Option<GcpCredentials>,
+        auth: GcpAuthenticator,
         cx: SinkContext,
     ) -> crate::Result<VectorSink> {
-        let request = self.request.unwrap_with(&TowerRequestConfig {
-            rate_limit_num: Some(1000),
-            ..Default::default()
-        });
+        let request = self.request.into_settings();
 
         let batch_settings = self.batch.into_batcher_settings()?;
 
         let partitioner = self.key_partitioner()?;
 
+        let protocol = get_http_scheme_from_uri(&base_url.parse::<Uri>().unwrap());
+
         let svc = ServiceBuilder::new()
-            .settings(request, GcsRetryLogic)
-            .service(GcsService::new(client, base_url, creds));
+            .settings(request, GcsRetryLogic::default())
+            .service(GcsService::new(client, base_url, auth));
 
-        let request_settings = RequestSettings::new(self)?;
+        let request_settings = RequestSettings::new(self, cx)?;
 
-        let sink = GcsSink::new(cx, svc, request_settings, partitioner, batch_settings);
+        let sink = GcsSink::new(svc, request_settings, partitioner, batch_settings, protocol);
 
         Ok(VectorSink::from_event_streamsink(sink))
     }
@@ -165,6 +294,7 @@ impl GcsSinkConfig {
         Ok(KeyPartitioner::new(
             Template::try_from(self.key_prefix.as_deref().unwrap_or("date=%F/"))
                 .context(KeyPrefixTemplateSnafu)?,
+            None,
         ))
     }
 }
@@ -182,58 +312,69 @@ struct RequestSettings {
     extension: String,
     time_format: String,
     append_uuid: bool,
-    encoding: EncodingConfig<StandardEncodings>,
+    encoder: (Transformer, Encoder<Framer>),
     compression: Compression,
+    tz_offset: Option<FixedOffset>,
 }
 
 impl RequestBuilder<(String, Vec<Event>)> for RequestSettings {
-    type Metadata = GcsMetadata;
+    type Metadata = (String, EventFinalizers);
     type Events = Vec<Event>;
-    type Encoder = EncodingConfig<StandardEncodings>;
+    type Encoder = (Transformer, Encoder<Framer>);
     type Payload = Bytes;
     type Request = GcsRequest;
-    type Error = io::Error; // TODO: this is ugly.
+    type Error = io::Error;
 
     fn compression(&self) -> Compression {
         self.compression
     }
 
     fn encoder(&self) -> &Self::Encoder {
-        &self.encoding
+        &self.encoder
     }
 
-    fn split_input(&self, input: (String, Vec<Event>)) -> (Self::Metadata, Self::Events) {
+    fn split_input(
+        &self,
+        input: (String, Vec<Event>),
+    ) -> (Self::Metadata, RequestMetadataBuilder, Self::Events) {
         let (partition_key, mut events) = input;
         let finalizers = events.take_finalizers();
+        let builder = RequestMetadataBuilder::from_events(&events);
 
-        let metadata = GcsMetadata {
-            key: partition_key,
-            count: events.len(),
-            byte_size: events.size_of(),
-            finalizers,
-        };
-        (metadata, events)
+        ((partition_key, finalizers), builder, events)
     }
 
-    fn build_request(&self, mut metadata: Self::Metadata, payload: Self::Payload) -> Self::Request {
+    fn build_request(
+        &self,
+        gcp_metadata: Self::Metadata,
+        metadata: RequestMetadata,
+        payload: EncodeResult<Self::Payload>,
+    ) -> Self::Request {
+        let (key, finalizers) = gcp_metadata;
         // TODO: pull the seconds from the last event
         let filename = {
-            let seconds = Utc::now().format(&self.time_format);
+            let seconds = match self.tz_offset {
+                Some(offset) => Utc::now().with_timezone(&offset).format(&self.time_format),
+                None => Utc::now()
+                    .with_timezone(&chrono::Utc)
+                    .format(&self.time_format),
+            };
 
             if self.append_uuid {
                 let uuid = Uuid::new_v4();
-                format!("{}-{}", seconds, uuid.to_hyphenated())
+                format!("{}-{}", seconds, uuid.hyphenated())
             } else {
                 seconds.to_string()
             }
         };
 
-        metadata.key = format!("{}{}.{}", metadata.key, filename, self.extension);
-
-        trace!(message = "Sending events.", bytes = ?payload.len(), events_len = ?metadata.count, key = ?metadata.key);
+        let key = format!("{}{}.{}", key, filename, self.extension);
+        let body = payload.into_payload();
 
         GcsRequest {
-            body: payload,
+            key,
+            body,
+            finalizers,
             settings: GcsRequestSettings {
                 acl: self.acl.clone(),
                 content_type: self.content_type.clone(),
@@ -247,11 +388,14 @@ impl RequestBuilder<(String, Vec<Event>)> for RequestSettings {
 }
 
 impl RequestSettings {
-    fn new(config: &GcsSinkConfig) -> crate::Result<Self> {
+    fn new(config: &GcsSinkConfig, cx: SinkContext) -> crate::Result<Self> {
+        let transformer = config.encoding.transformer();
+        let (framer, serializer) = config.encoding.build(SinkType::MessageBased)?;
+        let encoder = Encoder::<Framer>::new(framer, serializer);
         let acl = config
             .acl
             .map(|acl| HeaderValue::from_str(&to_string(acl)).unwrap());
-        let content_type = HeaderValue::from_str(config.encoding.codec().content_type()).unwrap();
+        let content_type = HeaderValue::from_str(encoder.content_type()).unwrap();
         let content_encoding = config
             .compression
             .content_encoding()
@@ -272,11 +416,13 @@ impl RequestSettings {
             .filename_extension
             .clone()
             .unwrap_or_else(|| config.compression.extension().into());
-        let time_format = config
-            .filename_time_format
-            .clone()
-            .unwrap_or_else(|| "%s".into());
-        let append_uuid = config.filename_append_uuid.unwrap_or(true);
+        let time_format = config.filename_time_format.clone();
+        let append_uuid = config.filename_append_uuid;
+        let offset = config
+            .timezone
+            .or(cx.globals.timezone)
+            .and_then(timezone_to_offset);
+
         Ok(Self {
             acl,
             content_type,
@@ -287,7 +433,8 @@ impl RequestSettings {
             time_format,
             append_uuid,
             compression: config.compression,
-            encoding: config.encoding.clone(),
+            encoder: (transformer, encoder),
+            tz_offset: offset,
         })
     }
 }
@@ -302,13 +449,54 @@ fn make_header((name, value): (&String, &String)) -> crate::Result<(HeaderName, 
 
 #[cfg(test)]
 mod tests {
-    use vector_core::partition::Partitioner;
+    use futures_util::{future::ready, stream};
+    use vector_lib::{
+        EstimatedJsonEncodedSizeOf,
+        codecs::{
+            JsonSerializerConfig, NewlineDelimitedEncoderConfig, TextSerializerConfig,
+            encoding::FramingConfig,
+        },
+        partition::Partitioner,
+        request_metadata::GroupedCountByteSize,
+    };
 
     use super::*;
+    use crate::{
+        event::LogEvent,
+        test_util::{
+            components::{SINK_TAGS, run_and_assert_sink_compliance},
+            http::{always_200_response, spawn_blackhole_http_server},
+        },
+    };
 
     #[test]
     fn generate_config() {
         crate::test_util::test_generate_config::<GcsSinkConfig>();
+    }
+
+    #[tokio::test]
+    async fn component_spec_compliance() {
+        let mock_endpoint = spawn_blackhole_http_server(always_200_response).await;
+
+        let context = SinkContext::default();
+
+        let tls = TlsSettings::default();
+        let client =
+            HttpClient::new(tls, context.proxy()).expect("should not fail to create HTTP client");
+
+        let config =
+            default_config((None::<FramingConfig>, JsonSerializerConfig::default()).into());
+        let sink = config
+            .build_sink(
+                client,
+                mock_endpoint.to_string(),
+                GcpAuthenticator::None,
+                context,
+            )
+            .expect("failed to build sink");
+
+        let event = Event::Log(LogEvent::from("simple message"));
+        run_and_assert_sink_compliance(sink, stream::once(ready(event)), &SINK_TAGS).await;
     }
 
     #[test]
@@ -316,58 +504,73 @@ mod tests {
         crate::test_util::trace_init();
 
         let message = "hello world".to_string();
-        let mut event = Event::from(message);
-        event.as_mut_log().insert("key", "value");
+        let mut event = LogEvent::from(message);
+        event.insert("key", "value");
 
         let sink_config = GcsSinkConfig {
             key_prefix: Some("key: {{ key }}".into()),
-            ..default_config(StandardEncodings::Text)
+            ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
         };
         let key = sink_config
             .key_partitioner()
             .unwrap()
-            .partition(&event)
+            .partition(&Event::Log(event))
             .expect("key wasn't provided");
 
         assert_eq!(key, "key: value");
     }
 
-    fn request_settings(sink_config: &GcsSinkConfig) -> RequestSettings {
-        RequestSettings::new(sink_config).expect("Could not create request settings")
+    fn request_settings(sink_config: &GcsSinkConfig, context: SinkContext) -> RequestSettings {
+        RequestSettings::new(sink_config, context).expect("Could not create request settings")
     }
 
     fn build_request(extension: Option<&str>, uuid: bool, compression: Compression) -> GcsRequest {
-        let log = Event::new_empty_log();
+        let context = SinkContext::default();
         let sink_config = GcsSinkConfig {
             key_prefix: Some("key/".into()),
-            filename_time_format: Some("date".into()),
+            filename_time_format: "date".into(),
             filename_extension: extension.map(Into::into),
-            filename_append_uuid: Some(uuid),
+            filename_append_uuid: uuid,
             compression,
-            ..default_config(StandardEncodings::Ndjson)
+            ..default_config(
+                (
+                    Some(NewlineDelimitedEncoderConfig::new()),
+                    JsonSerializerConfig::default(),
+                )
+                    .into(),
+            )
         };
+        let log = LogEvent::default().into();
         let key = sink_config
             .key_partitioner()
             .unwrap()
             .partition(&log)
             .expect("key wasn't provided");
-        let request_settings = request_settings(&sink_config);
-        let (metadata, _events) = request_settings.split_input((key, vec![log]));
-        request_settings.build_request(metadata, Bytes::new())
+
+        let mut byte_size = GroupedCountByteSize::new_untagged();
+        byte_size.add_event(&log, log.estimated_json_encoded_size_of());
+
+        let request_settings = request_settings(&sink_config, context);
+        let (metadata, metadata_request_builder, _events) =
+            request_settings.split_input((key, vec![log]));
+        let payload = EncodeResult::uncompressed(Bytes::new(), byte_size);
+        let request_metadata = metadata_request_builder.build(&payload);
+
+        request_settings.build_request(metadata, request_metadata, payload)
     }
 
     #[test]
     fn gcs_build_request() {
         let req = build_request(Some("ext"), false, Compression::None);
-        assert_eq!(req.metadata.key, "key/date.ext".to_string());
+        assert_eq!(req.key, "key/date.ext".to_string());
 
         let req = build_request(None, false, Compression::None);
-        assert_eq!(req.metadata.key, "key/date.log".to_string());
+        assert_eq!(req.key, "key/date.log".to_string());
 
         let req = build_request(None, false, Compression::gzip_default());
-        assert_eq!(req.metadata.key, "key/date.log.gz".to_string());
+        assert_eq!(req.key, "key/date.log.gz".to_string());
 
         let req = build_request(None, true, Compression::gzip_default());
-        assert_ne!(req.metadata.key, "key/date.log.gz".to_string());
+        assert_ne!(req.key, "key/date.log.gz".to_string());
     }
 }

@@ -1,13 +1,13 @@
 use async_trait::async_trait;
-use vector_lib::config::LogNamespace;
-use vector_lib::configurable::configurable_component;
-use vector_lib::schema::Definition;
 use vector_lib::{
-    config::{DataType, SourceOutput},
+    config::{DataType, LogNamespace, SourceOutput},
+    configurable::configurable_component,
+    schema::Definition,
     source::Source,
 };
 
 use crate::config::{SourceConfig, SourceContext};
+use typetag;
 
 /// Configuration for the `test_panic` source.
 #[configurable_component(source("test_panic", "Test (panic)."))]

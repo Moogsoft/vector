@@ -1,14 +1,14 @@
 use async_trait::async_trait;
-use futures_util::{future::err, FutureExt};
-use vector_lib::config::LogNamespace;
-use vector_lib::configurable::configurable_component;
-use vector_lib::schema::Definition;
+use futures_util::{FutureExt, future::err};
 use vector_lib::{
-    config::{DataType, SourceOutput},
+    config::{DataType, LogNamespace, SourceOutput},
+    configurable::configurable_component,
+    schema::Definition,
     source::Source,
 };
 
 use crate::config::{SourceConfig, SourceContext};
+use typetag;
 
 /// Configuration for the `test_error` source.
 #[configurable_component(source("test_error", "Test (error)."))]

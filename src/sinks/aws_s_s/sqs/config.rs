@@ -1,17 +1,19 @@
 use aws_sdk_sqs::Client as SqsClient;
-
-use crate::aws::RegionOrEndpoint;
-
-use crate::config::{
-    AcknowledgementsConfig, DataType, GenerateConfig, Input, ProxyConfig, SinkConfig, SinkContext,
-};
 use vector_lib::configurable::configurable_component;
 
 use super::{
-    client::SqsMessagePublisher, message_deduplication_id, message_group_id, BaseSSSinkConfig,
-    SSRequestBuilder, SSSink,
+    BaseSSSinkConfig, SSRequestBuilder, SSSink, client::SqsMessagePublisher,
+    message_deduplication_id, message_group_id,
 };
-use crate::{aws::create_client, common::sqs::SqsClientBuilder};
+use crate::{
+    aws::{RegionOrEndpoint, create_client},
+    common::sqs::SqsClientBuilder,
+    config::{
+        AcknowledgementsConfig, DataType, GenerateConfig, Input, ProxyConfig, SinkConfig,
+        SinkContext,
+    },
+};
+use typetag;
 
 /// Configuration for the `aws_sqs` sink.
 #[configurable_component(sink(
@@ -49,12 +51,13 @@ impl GenerateConfig for SqsSinkConfig {
 impl SqsSinkConfig {
     pub(super) async fn create_client(&self, proxy: &ProxyConfig) -> crate::Result<SqsClient> {
         create_client::<SqsClientBuilder>(
+            &SqsClientBuilder {},
             &self.base_config.auth,
             self.region.region(),
             self.region.endpoint(),
             proxy,
-            &self.base_config.tls,
-            &None,
+            self.base_config.tls.as_ref(),
+            None,
         )
         .await
     }

@@ -21,12 +21,17 @@
 
 //! The main library to support building Vector.
 
+#[cfg(all(unix, feature = "sinks-socket"))]
 #[macro_use]
-extern crate tracing;
+extern crate cfg_if;
 #[macro_use]
 extern crate derivative;
 #[macro_use]
+extern crate tracing;
+#[macro_use]
 extern crate vector_lib;
+
+pub use indoc::indoc;
 
 #[cfg(all(feature = "tikv-jemallocator", not(feature = "allocation-tracing")))]
 #[global_allocator]
@@ -88,7 +93,7 @@ pub mod line_agg;
 pub mod list;
 mod moog_version;
 #[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
-pub(crate) mod nats;
+pub mod nats;
 pub mod net;
 #[allow(unreachable_pub)]
 pub(crate) mod proto;
@@ -98,7 +103,6 @@ pub mod serde;
 #[cfg(windows)]
 pub mod service;
 pub mod signal;
-#[cfg(all(any(feature = "sinks-socket", feature = "sinks-statsd"), unix))]
 pub(crate) mod sink_ext;
 #[allow(unreachable_pub)]
 pub mod sinks;
@@ -128,8 +132,7 @@ pub mod vector_windows;
 
 use crate::moog_version::moog_version;
 pub use source_sender::SourceSender;
-pub use vector_lib::{event, metrics, schema, tcp, tls};
-pub use vector_lib::{shutdown, Error, Result};
+pub use vector_lib::{Error, Result, event, metrics, schema, shutdown, tcp, tls};
 
 static APP_NAME_SLUG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -169,7 +172,7 @@ pub fn vector_version() -> impl std::fmt::Display {
     // _ => built_info::PKG_VERSION.to_string(),
     // };
     // let pkg_version = built_info::VECTOR_VERSION.to_string();
-    "0.41.1".to_string()
+    "0.50.0".to_string()
 }
 
 /// Returns a string containing full version information of the current build.
@@ -185,17 +188,13 @@ pub fn get_version() -> String {
     // or full debug symbols. See the Cargo Book profiling section for value meaning:
     // https://doc.rust-lang.org/cargo/reference/profiles.html#debug
     let build_string = match built_info::DEBUG {
-        "1" => format!("{} debug=line", build_string),
-        "2" | "true" => format!("{} debug=full", build_string),
+        "1" => format!("{build_string} debug=line"),
+        "2" | "true" => format!("{build_string} debug=full"),
         _ => build_string,
     };
 
-    format!(
-        "{} ({}) vector {}",
-        pkg_version,
-        build_string,
-        vector_version()
-    )
+    let vector_version = vector_version();
+    format!("{pkg_version} ({build_string}) vector {vector_version}")
 }
 
 /// Includes information about the current build.
@@ -205,8 +204,13 @@ pub mod built_info {
 }
 
 /// Returns the host name of the current system.
+/// The hostname can be overridden by setting the VECTOR_HOSTNAME environment variable.
 pub fn get_hostname() -> std::io::Result<String> {
-    Ok(hostname::get()?.to_string_lossy().into())
+    Ok(if let Ok(hostname) = std::env::var("VECTOR_HOSTNAME") {
+        hostname.to_string()
+    } else {
+        hostname::get()?.to_string_lossy().into_owned()
+    })
 }
 
 /// Spawn a task with the given name. The name is only used if

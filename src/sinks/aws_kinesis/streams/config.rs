@@ -1,25 +1,29 @@
-use aws_sdk_kinesis::operation::describe_stream::DescribeStreamError;
-use aws_sdk_kinesis::operation::put_records::PutRecordsError;
+use aws_sdk_kinesis::operation::{
+    describe_stream::DescribeStreamError, put_records::PutRecordsError,
+};
 use aws_smithy_runtime_api::client::{orchestrator::HttpResponse, result::SdkError};
 use futures::FutureExt;
 use snafu::Snafu;
 use vector_lib::configurable::{component::GenerateConfig, configurable_component};
 
-use crate::sinks::util::retries::RetryAction;
+use super::{
+    KinesisClient, KinesisError, KinesisRecord, KinesisResponse, KinesisSinkBaseConfig, build_sink,
+    record::{KinesisStreamClient, KinesisStreamRecord},
+    sink::BatchKinesisRequest,
+};
 use crate::{
-    aws::{create_client, is_retriable_error, ClientBuilder},
+    aws::{ClientBuilder, create_client, is_retriable_error},
     config::{AcknowledgementsConfig, Input, ProxyConfig, SinkConfig, SinkContext},
     sinks::{
-        util::{retries::RetryLogic, BatchConfig, SinkBatchSettings},
         Healthcheck, VectorSink,
+        prelude::*,
+        util::{
+            BatchConfig, SinkBatchSettings,
+            retries::{RetryAction, RetryLogic},
+        },
     },
 };
-
-use super::{
-    build_sink,
-    record::{KinesisStreamClient, KinesisStreamRecord},
-    KinesisClient, KinesisError, KinesisRecord, KinesisResponse, KinesisSinkBaseConfig,
-};
+use typetag;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Snafu)]
@@ -37,7 +41,7 @@ pub struct KinesisClientBuilder;
 impl ClientBuilder for KinesisClientBuilder {
     type Client = KinesisClient;
 
-    fn build(config: &aws_types::SdkConfig) -> Self::Client {
+    fn build(&self, config: &aws_types::SdkConfig) -> Self::Client {
         KinesisClient::new(config)
     }
 }
@@ -99,12 +103,13 @@ impl KinesisStreamsSinkConfig {
 
     pub async fn create_client(&self, proxy: &ProxyConfig) -> crate::Result<KinesisClient> {
         create_client::<KinesisClientBuilder>(
+            &KinesisClientBuilder {},
             &self.base.auth,
             self.base.region.region(),
             self.base.region.endpoint(),
             proxy,
-            &self.base.tls,
-            &None,
+            self.base.tls.as_ref(),
+            None,
         )
         .await
     }
@@ -169,6 +174,7 @@ struct KinesisRetryLogic {
 
 impl RetryLogic for KinesisRetryLogic {
     type Error = SdkError<KinesisError, HttpResponse>;
+    type Request = BatchKinesisRequest<KinesisStreamRecord>;
     type Response = KinesisResponse;
 
     fn is_retriable_error(&self, error: &Self::Error) -> bool {
@@ -189,10 +195,24 @@ impl RetryLogic for KinesisRetryLogic {
         is_retriable_error(error)
     }
 
-    fn should_retry_response(&self, response: &Self::Response) -> RetryAction {
-        if response.failure_count > 0 && self.retry_partial {
-            let msg = format!("partial error count {}", response.failure_count);
-            RetryAction::Retry(msg.into())
+    fn should_retry_response(&self, response: &Self::Response) -> RetryAction<Self::Request> {
+        if response.failure_count > 0 && self.retry_partial && !response.failed_records.is_empty() {
+            let failed_records = response.failed_records.clone();
+            RetryAction::RetryPartial(Box::new(move |original_request| {
+                let failed_events: Vec<_> = failed_records
+                    .iter()
+                    .filter_map(|r| original_request.events.get(r.index).cloned())
+                    .collect();
+
+                let metadata = RequestMetadata::from_batch(
+                    failed_events.iter().map(|req| req.get_metadata().clone()),
+                );
+
+                BatchKinesisRequest {
+                    events: failed_events,
+                    metadata,
+                }
+            }))
         } else {
             RetryAction::Successful
         }

@@ -3,19 +3,21 @@ use std::{collections::HashMap, time::Duration};
 use futures::FutureExt;
 use rdkafka::ClientConfig;
 use serde_with::serde_as;
-use vector_lib::codecs::JsonSerializerConfig;
-use vector_lib::configurable::configurable_component;
-use vector_lib::lookup::lookup_v2::ConfigTargetPath;
+use vector_lib::{
+    codecs::JsonSerializerConfig, configurable::configurable_component,
+    lookup::lookup_v2::ConfigTargetPath,
+};
 use vrl::value::Kind;
 
 use crate::{
     kafka::{KafkaAuthConfig, KafkaCompression},
     serde::json::to_string,
     sinks::{
-        kafka::sink::{healthcheck, KafkaSink},
+        kafka::sink::{KafkaSink, healthcheck},
         prelude::*,
     },
 };
+use typetag;
 
 /// Configuration for the `kafka` sink.
 #[serde_as]
@@ -96,6 +98,18 @@ pub struct KafkaSinkConfig {
     #[configurable(metadata(docs::advanced))]
     pub message_timeout_ms: Duration,
 
+    /// The time window used for the `rate_limit_num` option.
+    #[configurable(metadata(docs::type_unit = "seconds"))]
+    #[configurable(metadata(docs::human_name = "Rate Limit Duration"))]
+    #[serde(default = "default_rate_limit_duration_secs")]
+    pub rate_limit_duration_secs: u64,
+
+    /// The maximum number of requests allowed within the `rate_limit_duration_secs` time window.
+    #[configurable(metadata(docs::type_unit = "requests"))]
+    #[configurable(metadata(docs::human_name = "Rate Limit Number"))]
+    #[serde(default = "default_rate_limit_num")]
+    pub rate_limit_num: u64,
+
     /// A map of advanced options to pass directly to the underlying `librdkafka` client.
     ///
     /// For more information on configuration options, see [Configuration properties][config_props_docs].
@@ -134,6 +148,14 @@ const fn default_message_timeout_ms() -> Duration {
     Duration::from_millis(300000) // default in librdkafka
 }
 
+const fn default_rate_limit_duration_secs() -> u64 {
+    1
+}
+
+const fn default_rate_limit_num() -> u64 {
+    i64::MAX as u64 // i64 avoids TOML deserialize issue
+}
+
 fn example_librdkafka_options() -> HashMap<String, String> {
     HashMap::<_, _>::from_iter([
         ("client.id".to_string(), "${ENV_VAR}".to_string()),
@@ -149,7 +171,7 @@ impl KafkaSinkConfig {
             .set("bootstrap.servers", &self.bootstrap_servers)
             .set(
                 "socket.timeout.ms",
-                &self.socket_timeout_ms.as_millis().to_string(),
+                self.socket_timeout_ms.as_millis().to_string(),
             )
             .set("statistics.interval.ms", "1000");
 
@@ -157,10 +179,10 @@ impl KafkaSinkConfig {
 
         // All batch options are producer only.
         client_config
-            .set("compression.codec", &to_string(self.compression))
+            .set("compression.codec", to_string(self.compression))
             .set(
                 "message.timeout.ms",
-                &self.message_timeout_ms.as_millis().to_string(),
+                self.message_timeout_ms.as_millis().to_string(),
             );
 
         if let Some(value) = self.batch.timeout_secs {
@@ -181,7 +203,7 @@ impl KafkaSinkConfig {
                 value,
                 "Applying batch option as librdkafka option."
             );
-            client_config.set(key, &((value * 1000.0).round().to_string()));
+            client_config.set(key, (value * 1000.0).round().to_string());
         }
         if let Some(value) = self.batch.max_events {
             // Maximum number of messages batched in one MessageSet. The total MessageSet size is
@@ -199,7 +221,7 @@ impl KafkaSinkConfig {
                 value,
                 "Applying batch option as librdkafka option."
             );
-            client_config.set(key, &value.to_string());
+            client_config.set(key, value.to_string());
         }
         if let Some(value) = self.batch.max_bytes {
             // Maximum size (in bytes) of all messages batched in one MessageSet, including protocol
@@ -220,7 +242,7 @@ impl KafkaSinkConfig {
                 value,
                 "Applying batch option as librdkafka option."
             );
-            client_config.set(key, &value.to_string());
+            client_config.set(key, value.to_string());
         }
 
         for (key, value) in self.librdkafka_options.iter() {
@@ -245,6 +267,8 @@ impl GenerateConfig for KafkaSinkConfig {
             auth: Default::default(),
             socket_timeout_ms: default_socket_timeout_ms(),
             message_timeout_ms: default_message_timeout_ms(),
+            rate_limit_duration_secs: default_rate_limit_duration_secs(),
+            rate_limit_num: default_rate_limit_num(),
             librdkafka_options: Default::default(),
             headers_key: None,
             acknowledgements: Default::default(),
@@ -256,9 +280,9 @@ impl GenerateConfig for KafkaSinkConfig {
 #[async_trait::async_trait]
 #[typetag::serde(name = "kafka")]
 impl SinkConfig for KafkaSinkConfig {
-    async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
+    async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let sink = KafkaSink::new(self.clone())?;
-        let hc = healthcheck(self.clone()).boxed();
+        let hc = healthcheck(self.clone(), cx.healthcheck.clone()).boxed();
         Ok((VectorSink::from_event_streamsink(sink), hc))
     }
 

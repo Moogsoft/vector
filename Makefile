@@ -48,7 +48,7 @@ export CURRENT_DIR = $(shell pwd)
 # Override this to automatically enter a container containing the correct, full, official build environment for Vector, ready for development
 export ENVIRONMENT ?= false
 # The upstream container we publish artifacts to on a successful master build.
-export ENVIRONMENT_UPSTREAM ?= docker.io/timberio/vector-dev:sha-3eadc96742a33754a5859203b58249f6a806972a
+export ENVIRONMENT_UPSTREAM ?= docker.io/timberio/vector-dev:latest
 # Override to disable building the container, having it pull from the GitHub packages repo instead
 # TODO: Disable this by default. Blocked by `docker pull` from GitHub Packages requiring authenticated login
 export ENVIRONMENT_AUTOBUILD ?= true
@@ -119,6 +119,9 @@ define MAYBE_ENVIRONMENT_COPY_ARTIFACTS
 endef
 endif
 
+# docker container id file needs to live in the host machine and is later mounted into the container
+CIDFILE := $(shell mktemp -u /tmp/vector-environment-docker-cid.XXXXXX)
+
 # We use a volume here as non-Linux hosts are extremely slow to share disks, and Linux hosts tend to get permissions clobbered.
 define ENVIRONMENT_EXEC
 	${ENVIRONMENT_PREPARE}
@@ -134,11 +137,13 @@ define ENVIRONMENT_EXEC
 			$(if $(ENVIRONMENT_NETWORK),--network $(ENVIRONMENT_NETWORK),) \
 			--mount type=bind,source=${CURRENT_DIR},target=/git/vectordotdev/vector \
 			$(if $(findstring docker,$(CONTAINER_TOOL)),--mount type=bind$(COMMA)source=/var/run/docker.sock$(COMMA)target=/var/run/docker.sock,) \
+			$(if $(findstring docker,$(CONTAINER_TOOL)),--cidfile $(CIDFILE),) \
+			$(if $(findstring docker,$(CONTAINER_TOOL)),--mount type=bind$(COMMA)source=$(CIDFILE)$(COMMA)target=/.docker-container-id,) \
 			--mount type=volume,source=vector-target,target=/git/vectordotdev/vector/target \
 			--mount type=volume,source=vector-cargo-cache,target=/root/.cargo \
 			--mount type=volume,source=vector-rustup-cache,target=/root/.rustup \
 			$(foreach publish,$(ENVIRONMENT_PUBLISH),--publish $(publish)) \
-			$(ENVIRONMENT_UPSTREAM)
+			$(ENVIRONMENT_UPSTREAM); rm -f $(CIDFILE)
 endef
 
 
@@ -257,8 +262,9 @@ CARGO_HANDLES_FRESHNESS:
 cross-image-%: export TRIPLE =$($(strip @):cross-image-%=%)
 cross-image-%:
 	$(CONTAINER_TOOL) build \
+		--build-arg TARGET=${TRIPLE} \
+		--file scripts/cross/Dockerfile \
 		--tag vector-cross-env:${TRIPLE} \
-		--file scripts/cross/${TRIPLE}.dockerfile \
 		.
 
 # This is basically a shorthand for folks.
@@ -336,7 +342,7 @@ target/%/collector.tar.gz: target/%/collector CARGO_HANDLES_FRESHNESS
 # https://github.com/rust-lang/cargo/issues/6454
 .PHONY: test
 test: ## Run the unit test suite
-	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --bin collector --workspace --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
+	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --bin collector --workspace --no-fail-fast --no-tests pass --no-default-features --features "${FEATURES}" ${SCOPE}
 
 .PHONY: test-docs
 test-docs: ## Run the docs test suite
@@ -373,7 +379,7 @@ test-integration: test-integration-databend test-integration-docker-logs test-in
 test-integration: test-integration-eventstoredb test-integration-fluent test-integration-gcp test-integration-greptimedb test-integration-humio test-integration-http-client test-integration-influxdb
 test-integration: test-integration-kafka test-integration-logstash test-integration-loki test-integration-mongodb test-integration-nats
 test-integration: test-integration-nginx test-integration-opentelemetry test-integration-postgres test-integration-prometheus test-integration-pulsar
-test-integration: test-integration-redis test-integration-splunk test-integration-dnstap test-integration-datadog-agent test-integration-datadog-logs test-integration-e2e-datadog-logs
+test-integration: test-integration-redis test-integration-splunk test-integration-dnstap test-integration-datadog-agent test-integration-datadog-logs test-integration-e2e-datadog-logs test-integration-e2e-opentelemetry-logs
 test-integration: test-integration-datadog-traces test-integration-shutdown
 
 test-integration-%-cleanup:
@@ -463,7 +469,7 @@ check-component-features: ## Check that all component features are setup properl
 
 .PHONY: check-clippy
 check-clippy: ## Check code with Clippy
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check rust --clippy
+	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check rust
 
 .PHONY: check-docs
 check-docs: ## Check that all /docs file are valid
@@ -580,19 +586,19 @@ package-arm-unknown-linux-musleabi: target/artifacts/vector-${VERSION}-arm-unkno
 
 .PHONY: package-deb-x86_64-unknown-linux-gnu
 package-deb-x86_64-unknown-linux-gnu: package-x86_64-unknown-linux-gnu ## Build the x86_64 GNU deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
 
 .PHONY: package-deb-x86_64-unknown-linux-musl
 package-deb-x86_64-unknown-linux-musl: package-x86_64-unknown-linux-musl ## Build the x86_64 GNU deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-musl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-musl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
 
 .PHONY: package-deb-aarch64
 package-deb-aarch64: package-aarch64-unknown-linux-gnu ## Build the aarch64 deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=aarch64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=aarch64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
 
 .PHONY: package-deb-armv7-gnu
 package-deb-armv7-gnu: package-armv7-unknown-linux-gnueabihf ## Build the armv7-unknown-linux-gnueabihf deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=armv7-unknown-linux-gnueabihf -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=armv7-unknown-linux-gnueabihf -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
 
 .PHONY: package-deb-arm-gnu
 package-deb-arm-gnu: package-arm-unknown-linux-gnueabi ## Build the arm-unknown-linux-gnueabi deb package
@@ -602,7 +608,7 @@ package-deb-arm-gnu: package-arm-unknown-linux-gnueabi ## Build the arm-unknown-
 
 .PHONY: package-rpm-x86_64-unknown-linux-gnu
 package-rpm-x86_64-unknown-linux-gnu: package-x86_64-unknown-linux-gnu ## Build the x86_64 rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
 
 .PHONY: package-rpm-x86_64-unknown-linux-musl
 package-rpm-x86_64-unknown-linux-musl: package-x86_64-unknown-linux-musl ## Build the x86_64 musl rpm package
@@ -610,11 +616,11 @@ package-rpm-x86_64-unknown-linux-musl: package-x86_64-unknown-linux-musl ## Buil
 
 .PHONY: package-rpm-aarch64
 package-rpm-aarch64: package-aarch64-unknown-linux-gnu ## Build the aarch64 rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=aarch64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=aarch64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
 
 .PHONY: package-rpm-armv7hl-gnu
 package-rpm-armv7hl-gnu: package-armv7-unknown-linux-gnueabihf ## Build the armv7hl-unknown-linux-gnueabihf rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=armv7-unknown-linux-gnueabihf -e ARCH=armv7hl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
+	$(CONTAINER_TOOL) run --security-opt seccomp=unconfined -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=armv7-unknown-linux-gnueabihf -e ARCH=armv7hl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
 
 ##@ Releasing
 
@@ -681,10 +687,6 @@ compile-vrl-wasm: ## Compile VRL crates to WASM target
 clean: environment-clean ## Clean everything
 	cargo clean
 
-.PHONY: fmt
-fmt: ## Format code
-	${MAYBE_ENVIRONMENT_EXEC} cargo fmt
-
 .PHONY: generate-kubernetes-manifests
 generate-kubernetes-manifests: ## Generate Kubernetes manifests from latest Helm chart
 	cargo vdev build manifests
@@ -731,3 +733,15 @@ cargo-install-%:
 .PHONY: ci-generate-publish-metadata
 ci-generate-publish-metadata: ## Generates the necessary metadata required for building/publishing Vector.
 	cargo vdev build publish-metadata
+
+.PHONY: clippy-fix
+clippy-fix:
+	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check rust --fix
+
+.PHONY: fmt
+fmt:
+	${MAYBE_ENVIRONMENT_EXEC} cargo vdev fmt
+
+.PHONY: build-licenses
+build-licenses:
+	${MAYBE_ENVIRONMENT_EXEC} cargo vdev build licenses

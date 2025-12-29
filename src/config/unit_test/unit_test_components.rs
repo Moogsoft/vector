@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use futures::{stream, Sink, Stream};
-use futures_util::{future, stream::BoxStream, FutureExt, StreamExt};
-use tokio::sync::{oneshot, Mutex};
-use vector_lib::configurable::configurable_component;
+use futures::{Sink, Stream, stream};
+use futures_util::{FutureExt, StreamExt, future, stream::BoxStream};
+use tokio::sync::{Mutex, oneshot};
 use vector_lib::{
     config::{DataType, Input, LogNamespace},
+    configurable::configurable_component,
     event::Event,
     schema,
     sink::{StreamSink, VectorSink},
@@ -19,6 +19,7 @@ use crate::{
     sinks::Healthcheck,
     sources,
 };
+use typetag;
 
 /// Configuration for the `unit_test` source.
 #[configurable_component(source("unit_test", "Unit test."))]
@@ -220,8 +221,7 @@ impl StreamSink<Event> for UnitTestSink {
                                         break;
                                     }
                                     Err(error) => {
-                                        condition_errors
-                                            .push(format!("  condition[{}]: {}", j, error));
+                                        condition_errors.push(format!("  condition[{j}]: {error}"));
                                     }
                                 }
                             }
@@ -262,10 +262,10 @@ impl StreamSink<Event> for UnitTestSink {
             UnitTestSinkCheck::NoOp => {}
         }
 
-        if let Some(tx) = self.result_tx {
-            if tx.send(result).is_err() {
-                error!(message = "Sending unit test results failed in unit test sink.");
-            }
+        if let Some(tx) = self.result_tx
+            && tx.send(result).is_err()
+        {
+            error!(message = "Sending unit test results failed in unit test sink.");
         }
         Ok(())
     }

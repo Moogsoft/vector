@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use enum_dispatch::enum_dispatch;
-use vector_lib::configurable::{configurable_component, NamedComponent};
+use vector_lib::configurable::{NamedComponent, configurable_component};
 
 #[cfg(feature = "moogsoft-pipelines")]
 use crate::providers::moogsoft::provider::MoogsoftHttpConfig;

@@ -1,39 +1,50 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
-    error::Error as _, future::Future, pin::Pin, sync::Arc, task::Context, task::Poll,
+    error::Error as _,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
     time::Duration,
 };
 
 use chrono::DateTime;
 use derivative::Derivative;
-use futures::{stream, stream::FuturesUnordered, FutureExt, Stream, StreamExt, TryFutureExt};
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream, stream::FuturesUnordered};
 use http::uri::{InvalidUri, Scheme, Uri};
-use once_cell::sync::Lazy;
 use serde_with::serde_as;
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
+    Code, Request, Status,
     metadata::MetadataValue,
     transport::{Certificate, ClientTlsConfig, Endpoint, Identity},
-    Code, Request, Status,
 };
-use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
-use vector_lib::config::{LegacyKey, LogNamespace};
-use vector_lib::configurable::configurable_component;
-use vector_lib::internal_event::{
-    ByteSize, BytesReceived, EventsReceived, InternalEventHandle as _, Protocol, Registered,
+use vector_lib::{
+    byte_size_of::ByteSizeOf,
+    codecs::decoding::{DeserializerConfig, FramingConfig},
+    config::{LegacyKey, LogNamespace},
+    configurable::configurable_component,
+    finalizer::UnorderedFinalizer,
+    internal_event::{
+        ByteSize, BytesReceived, EventsReceived, InternalEventHandle as _, Protocol, Registered,
+    },
+    lookup::owned_value_path,
 };
-use vector_lib::lookup::owned_value_path;
-use vector_lib::{byte_size_of::ByteSizeOf, finalizer::UnorderedFinalizer};
-use vrl::path;
-use vrl::value::{kind::Collection, Kind};
+use vrl::{
+    path,
+    value::{Kind, kind::Collection},
+};
 
 use crate::{
+    SourceSender,
     codecs::{Decoder, DecodingConfig},
     config::{DataType, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput},
     event::{BatchNotifier, BatchStatus, Event, MaybeAsLogMut, Value},
-    gcp::{GcpAuthConfig, GcpAuthenticator, Scope, PUBSUB_URL},
+    gcp::{GcpAuthConfig, GcpAuthenticator, PUBSUB_URL, Scope},
     internal_events::{
         GcpPubsubConnectError, GcpPubsubReceiveError, GcpPubsubStreamingPullError,
         StreamClosedError,
@@ -42,8 +53,8 @@ use crate::{
     shutdown::ShutdownSignal,
     sources::util,
     tls::{TlsConfig, TlsSettings},
-    SourceSender,
 };
+use typetag;
 
 const MIN_ACK_DEADLINE_SECS: u64 = 10;
 const MAX_ACK_DEADLINE_SECS: u64 = 600;
@@ -108,7 +119,7 @@ pub(crate) enum PubsubError {
     InvalidAckDeadline,
 }
 
-static CLIENT_ID: Lazy<String> = Lazy::new(|| uuid::Uuid::new_v4().to_string());
+static CLIENT_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
 /// Configuration for the `gcp_pubsub` source.
 #[serde_as]
@@ -251,7 +262,9 @@ impl SourceConfig for PubsubConfig {
         let ack_deadline_secs = match self.ack_deadline_seconds {
             None => self.ack_deadline_secs,
             Some(ads) => {
-                warn!("The `ack_deadline_seconds` setting is deprecated, use `ack_deadline_secs` instead.");
+                warn!(
+                    "The `ack_deadline_seconds` setting is deprecated, use `ack_deadline_secs` instead."
+                );
                 Duration::from_secs(ads as u64)
             }
         };
@@ -262,7 +275,9 @@ impl SourceConfig for PubsubConfig {
         let retry_delay_secs = match self.retry_delay_seconds {
             None => self.retry_delay_secs,
             Some(rds) => {
-                warn!("The `retry_delay_seconds` setting is deprecated, use `retry_delay_secs` instead.");
+                warn!(
+                    "The `retry_delay_seconds` setting is deprecated, use `retry_delay_secs` instead."
+                );
                 Duration::from_secs_f64(rds)
             }
         };
@@ -272,7 +287,7 @@ impl SourceConfig for PubsubConfig {
         let mut uri: Uri = self.endpoint.parse().context(UriSnafu)?;
         auth.apply_uri(&mut uri);
 
-        let tls = TlsSettings::from_options(&self.tls)?;
+        let tls = TlsSettings::from_options(self.tls.as_ref())?;
         let host = uri.host().unwrap_or("pubsub.googleapis.com");
         let mut tls_config = ClientTlsConfig::new().domain_name(host);
         if let Some((cert, key)) = tls.identity_pem() {
@@ -482,7 +497,9 @@ impl PubsubSource {
                 }
                 Ok(req)
             },
-        );
+        )
+        // Tonic added a default of 4MB in 0.9. This replaces the old behavior.
+        .max_decoding_message_size(usize::MAX);
 
         let (ack_ids_sender, ack_ids_receiver) = mpsc::channel(ACK_QUEUE_SIZE);
 
@@ -567,7 +584,7 @@ impl PubsubSource {
     fn request_stream(
         &self,
         ack_ids: mpsc::Receiver<Vec<String>>,
-    ) -> impl Stream<Item = proto::StreamingPullRequest> + 'static {
+    ) -> impl Stream<Item = proto::StreamingPullRequest> + 'static + use<> {
         let subscription = self.subscription.clone();
         let client_id = CLIENT_ID.clone();
         let stream_ack_deadline_seconds = self.ack_deadline_secs.as_secs() as i32;
@@ -718,7 +735,7 @@ fn is_reset(error: &Status) -> bool {
         .and_then(|source| source.downcast_ref::<hyper::Error>())
         .and_then(|error| error.source())
         .and_then(|source| source.downcast_ref::<h2::Error>())
-        .map_or(false, |error| error.is_remote() && error.is_reset())
+        .is_some_and(|error| error.is_remote() && error.is_reset())
 }
 
 #[pin_project::pin_project]
@@ -737,8 +754,7 @@ impl Future for Task {
 
 #[cfg(test)]
 mod tests {
-    use vector_lib::lookup::OwnedTargetPath;
-    use vector_lib::schema::Definition;
+    use vector_lib::{lookup::OwnedTargetPath, schema::Definition};
 
     use super::*;
 
@@ -828,28 +844,39 @@ mod tests {
 
 #[cfg(all(test, feature = "gcp-integration-tests"))]
 mod integration_tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        sync::LazyLock,
+    };
 
-    use base64::prelude::{Engine as _, BASE64_STANDARD};
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
     use chrono::{DateTime, Utc};
     use futures::{Stream, StreamExt};
     use http::method::Method;
     use hyper::{Request, StatusCode};
-    use once_cell::sync::Lazy;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tokio::time::{Duration, Instant};
     use vrl::btreemap;
 
     use super::*;
-    use crate::config::{ComponentKey, ProxyConfig};
-    use crate::test_util::components::{assert_source_compliance, SOURCE_TAGS};
-    use crate::test_util::{self, components, random_string};
-    use crate::{event::EventStatus, gcp, http::HttpClient, shutdown, SourceSender};
+    use crate::{
+        SourceSender,
+        config::{ComponentKey, ProxyConfig},
+        event::EventStatus,
+        gcp,
+        http::HttpClient,
+        shutdown,
+        test_util::{
+            self, components,
+            components::{SOURCE_TAGS, assert_source_compliance},
+            random_string,
+        },
+    };
 
     const PROJECT: &str = "sourceproject";
-    static PROJECT_URI: Lazy<String> =
-        Lazy::new(|| format!("{}/v1/projects/{}", *gcp::PUBSUB_ADDRESS, PROJECT));
-    static ACK_DEADLINE: Lazy<Duration> = Lazy::new(|| Duration::from_secs(10)); // Minimum custom deadline allowed by Pub/Sub
+    static PROJECT_URI: LazyLock<String> =
+        LazyLock::new(|| format!("{}/v1/projects/{}", *gcp::PUBSUB_ADDRESS, PROJECT));
+    static ACK_DEADLINE: LazyLock<Duration> = LazyLock::new(|| Duration::from_secs(10)); // Minimum custom deadline allowed by Pub/Sub
 
     #[tokio::test]
     async fn oneshot() {
@@ -983,7 +1010,7 @@ mod integration_tests {
     ) {
         components::init_test();
 
-        let tls_settings = TlsSettings::from_options(&None).unwrap();
+        let tls_settings = TlsSettings::from_options(None).unwrap();
         let client = HttpClient::new(tls_settings, &ProxyConfig::default()).unwrap();
         let tester = Tester::new(client).await;
 
@@ -1035,7 +1062,7 @@ mod integration_tests {
             &self,
             status: EventStatus,
         ) -> (
-            impl Stream<Item = Event> + Unpin,
+            impl Stream<Item = Event> + Unpin + use<>,
             shutdown::SourceShutdownCoordinator,
         ) {
             let (tx, rx) = SourceSender::new_test_finalize(status);
@@ -1109,7 +1136,7 @@ mod integration_tests {
             let response = self.client.send(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-            serde_json::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap()
+            serde_json::from_str(core::str::from_utf8(&body).unwrap()).unwrap()
         }
 
         async fn shutdown_check(&self, shutdown: shutdown::SourceShutdownCoordinator) {

@@ -1,11 +1,9 @@
-use std::num::NonZeroU64;
+use std::sync::OnceLock;
 
-use futures::FutureExt;
-use http::{uri::InvalidUri, Uri};
-use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, Snafu};
+use http::Uri;
+use snafu::ResultExt;
 use tower::ServiceBuilder;
-use vector_core::config::proxy::ProxyConfig;
+use vector_lib::{config::proxy::ProxyConfig, configurable::configurable_component};
 
 use super::{
     request_builder::DatadogMetricsRequestBuilder,
@@ -13,21 +11,20 @@ use super::{
     sink::DatadogMetricsSink,
 };
 use crate::{
-    config::{DataType, SinkConfig, SinkContext},
+    common::datadog,
+    config::{AcknowledgementsConfig, Input, SinkConfig, SinkContext},
     http::HttpClient,
     sinks::{
-        datadog::{get_api_validate_endpoint, get_base_domain, healthcheck, Region},
-        util::{
-            batch::BatchConfig, Concurrency, ServiceBuilderExt, SinkBatchSettings,
-            TowerRequestConfig,
-        },
         Healthcheck, UriParseSnafu, VectorSink,
+        datadog::{DatadogCommonConfig, LocalDatadogCommonConfig},
+        util::{ServiceBuilderExt, SinkBatchSettings, TowerRequestConfig, batch::BatchConfig},
     },
+    tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
+use typetag;
 
-// TODO: revisit our concurrency and batching defaults
-const DEFAULT_REQUEST_LIMITS: TowerRequestConfig =
-    TowerRequestConfig::new(Concurrency::None).retry_attempts(5);
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DatadogMetricsDefaultBatchSettings;
 
 // This default is centered around "series" data, which should be the lion's share of what we
 // process.  Given that a single series, when encoded, is in the 150-300 byte range, we can fit a
@@ -35,22 +32,38 @@ const DEFAULT_REQUEST_LIMITS: TowerRequestConfig =
 // conservative, though, we use 100K here.  This will also get a little more tricky when it comes to
 // distributions and sketches, but we're going to have to implement incremental encoding to handle
 // "we've exceeded our maximum payload size, split this batch" scenarios anyways.
-pub const MAXIMUM_PAYLOAD_COMPRESSED_SIZE: usize = 3_200_000;
-pub const MAXIMUM_PAYLOAD_SIZE: usize = 62_914_560;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DatadogMetricsDefaultBatchSettings;
-
 impl SinkBatchSettings for DatadogMetricsDefaultBatchSettings {
     const MAX_EVENTS: Option<usize> = Some(100_000);
     const MAX_BYTES: Option<usize> = None;
-    const TIMEOUT_SECS: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(2) };
+    const TIMEOUT_SECS: f64 = 2.0;
 }
 
-#[derive(Debug, Snafu)]
-enum BuildError {
-    #[snafu(display("Invalid host {:?}: {:?}", host, source))]
-    InvalidHost { host: String, source: InvalidUri },
+pub(super) const SERIES_V1_PATH: &str = "/api/v1/series";
+pub(super) const SERIES_V2_PATH: &str = "/api/v2/series";
+pub(super) const SKETCHES_PATH: &str = "/api/beta/sketches";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SeriesApiVersion {
+    V1,
+    V2,
+}
+
+impl SeriesApiVersion {
+    pub const fn get_path(self) -> &'static str {
+        match self {
+            Self::V1 => SERIES_V1_PATH,
+            Self::V2 => SERIES_V2_PATH,
+        }
+    }
+    fn get_api_version() -> Self {
+        static API_VERSION: OnceLock<SeriesApiVersion> = OnceLock::new();
+        *API_VERSION.get_or_init(|| {
+            match std::env::var("VECTOR_TEMP_USE_DD_METRICS_SERIES_V2_API") {
+                Ok(_) => Self::V2,
+                Err(_) => Self::V1,
+            }
+        })
+    }
 }
 
 /// Various metric type-specific API types.
@@ -58,16 +71,54 @@ enum BuildError {
 /// Each of these corresponds to a specific request path when making a request to the agent API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DatadogMetricsEndpoint {
-    Series,
+    Series(SeriesApiVersion),
     Sketches,
+}
+
+/// Payload limits for metrics are endpoint-dependent.
+pub(super) struct DatadogMetricsPayloadLimits {
+    pub(super) uncompressed: usize,
+    pub(super) compressed: usize,
 }
 
 impl DatadogMetricsEndpoint {
     /// Gets the content type associated with the specific encoder for a given metric endpoint.
     pub const fn content_type(self) -> &'static str {
         match self {
-            DatadogMetricsEndpoint::Series => "application/json",
-            DatadogMetricsEndpoint::Sketches => "application/x-protobuf",
+            Self::Series(SeriesApiVersion::V1) => "application/json",
+            Self::Sketches | Self::Series(SeriesApiVersion::V2) => "application/x-protobuf",
+        }
+    }
+
+    // Gets whether or not this is a series endpoint.
+    pub const fn is_series(self) -> bool {
+        matches!(self, Self::Series { .. })
+    }
+
+    // Creates an instance of the `Series` variant with the default API version.
+    pub fn series() -> Self {
+        Self::Series(SeriesApiVersion::get_api_version())
+    }
+
+    pub(super) const fn payload_limits(self) -> DatadogMetricsPayloadLimits {
+        // from https://docs.datadoghq.com/api/latest/metrics/#submit-metrics
+
+        let (uncompressed, compressed) = match self {
+            // Sketches use the same payload size limits as v1 series
+            DatadogMetricsEndpoint::Series(SeriesApiVersion::V1)
+            | DatadogMetricsEndpoint::Sketches => (
+                62_914_560, // 60 MiB
+                3_200_000,  // 3.2 MB
+            ),
+            DatadogMetricsEndpoint::Series(SeriesApiVersion::V2) => (
+                5_242_880, // 5 MiB
+                512_000,   // 512 KB
+            ),
+        };
+
+        DatadogMetricsPayloadLimits {
+            uncompressed,
+            compressed,
         }
     }
 }
@@ -90,25 +141,33 @@ impl DatadogMetricsEndpointConfiguration {
     /// Gets the URI for the given Datadog metrics endpoint.
     pub fn get_uri_for_endpoint(&self, endpoint: DatadogMetricsEndpoint) -> Uri {
         match endpoint {
-            DatadogMetricsEndpoint::Series => self.series_endpoint.clone(),
+            DatadogMetricsEndpoint::Series { .. } => self.series_endpoint.clone(),
             DatadogMetricsEndpoint::Sketches => self.sketches_endpoint.clone(),
         }
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+/// Configuration for the `datadog_metrics` sink.
+#[configurable_component(sink("datadog_metrics", "Publish metric events to Datadog."))]
+#[derive(Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DatadogMetricsConfig {
+    #[serde(flatten)]
+    pub local_dd_common: LocalDatadogCommonConfig,
+
+    /// Sets the default namespace for any metrics sent.
+    ///
+    /// This namespace is only used if a metric has no existing namespace. When a namespace is
+    /// present, it is used as a prefix to the metric name, and separated with a period (`.`).
+    #[configurable(metadata(docs::examples = "myservice"))]
+    #[serde(default)]
     pub default_namespace: Option<String>,
-    pub endpoint: Option<String>,
-    // Deprecated, replaced by the site option
-    pub region: Option<Region>,
-    pub site: Option<String>,
-    // Deprecated name
-    #[serde(alias = "api_key")]
-    default_api_key: String,
+
+    #[configurable(derived)]
     #[serde(default)]
     pub batch: BatchConfig<DatadogMetricsDefaultBatchSettings>,
+
+    #[configurable(derived)]
     #[serde(default)]
     pub request: TowerRequestConfig,
 }
@@ -120,30 +179,24 @@ impl_generate_config_from_default!(DatadogMetricsConfig);
 impl SinkConfig for DatadogMetricsConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let client = self.build_client(&cx.proxy)?;
-        let healthcheck = self.build_healthcheck(client.clone())?;
-        let sink = self.build_sink(client, cx)?;
+        let global = cx.extra_context.get_or_default::<datadog::Options>();
+        let dd_common = self.local_dd_common.with_globals(global)?;
+        let healthcheck = dd_common.build_healthcheck(client.clone())?;
+        let sink = self.build_sink(&dd_common, client)?;
 
         Ok((sink, healthcheck))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Metric
+    fn input(&self) -> Input {
+        Input::metric()
     }
 
-    fn sink_type(&self) -> &'static str {
-        "datadog_metrics"
+    fn acknowledgements(&self) -> &AcknowledgementsConfig {
+        &self.local_dd_common.acknowledgements
     }
 }
 
 impl DatadogMetricsConfig {
-    /// Creates a default [`DatadogMetricsConfig`] with the given API key.
-    pub fn from_api_key<T: Into<String>>(api_key: T) -> Self {
-        Self {
-            default_api_key: api_key.into(),
-            ..Self::default()
-        }
-    }
-
     /// Gets the base URI of the Datadog agent API.
     ///
     /// Per the Datadog agent convention, we should include a unique identifier as part of the
@@ -152,13 +205,13 @@ impl DatadogMetricsConfig {
     /// doing something wrong, for understanding issues from the API side.
     ///
     /// The `endpoint` configuration field will be used here if it is present.
-    fn get_base_agent_endpoint(&self) -> String {
-        self.endpoint.clone().unwrap_or_else(|| {
+    fn get_base_agent_endpoint(&self, dd_common: &DatadogCommonConfig) -> String {
+        dd_common.endpoint.clone().unwrap_or_else(|| {
             let version = str::replace(crate::built_info::PKG_VERSION, ".", "-");
             format!(
                 "https://{}-vector.agent.{}",
                 version,
-                get_base_domain(self.site.as_ref(), self.region)
+                dd_common.site.as_str()
             )
         })
     }
@@ -166,10 +219,12 @@ impl DatadogMetricsConfig {
     /// Generates the `DatadogMetricsEndpointConfiguration`, used for mapping endpoints to their URI.
     fn generate_metrics_endpoint_configuration(
         &self,
+        dd_common: &DatadogCommonConfig,
     ) -> crate::Result<DatadogMetricsEndpointConfiguration> {
-        let base_uri = self.get_base_agent_endpoint();
-        let series_endpoint = build_uri(&base_uri, "/api/v1/series")?;
-        let sketches_endpoint = build_uri(&base_uri, "/api/beta/sketches")?;
+        let base_uri = self.get_base_agent_endpoint(dd_common);
+
+        let series_endpoint = build_uri(&base_uri, SeriesApiVersion::get_api_version().get_path())?;
+        let sketches_endpoint = build_uri(&base_uri, SKETCHES_PATH)?;
 
         Ok(DatadogMetricsEndpointConfiguration::new(
             series_endpoint,
@@ -178,26 +233,38 @@ impl DatadogMetricsConfig {
     }
 
     fn build_client(&self, proxy: &ProxyConfig) -> crate::Result<HttpClient> {
-        let client = HttpClient::new(None, proxy)?;
+        let default_tls_config;
+
+        let tls_settings = MaybeTlsSettings::from_config(
+            Some(match self.local_dd_common.tls.as_ref() {
+                Some(config) => config,
+                None => {
+                    default_tls_config = TlsEnableableConfig::enabled();
+                    &default_tls_config
+                }
+            }),
+            false,
+        )?;
+        let client = HttpClient::new(tls_settings, proxy)?;
         Ok(client)
     }
 
-    fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
-        let validate_endpoint =
-            get_api_validate_endpoint(self.endpoint.as_ref(), self.site.as_ref(), self.region)?;
-        Ok(healthcheck(client, validate_endpoint, self.default_api_key.clone()).boxed())
-    }
-
-    fn build_sink(&self, client: HttpClient, cx: SinkContext) -> crate::Result<VectorSink> {
+    fn build_sink(
+        &self,
+        dd_common: &DatadogCommonConfig,
+        client: HttpClient,
+    ) -> crate::Result<VectorSink> {
         let batcher_settings = self.batch.into_batcher_settings()?;
 
-        let request_limits = self.request.unwrap_with(&DEFAULT_REQUEST_LIMITS);
-        let endpoint_configuration = self.generate_metrics_endpoint_configuration()?;
+        // TODO: revisit our concurrency and batching defaults
+        let request_limits = self.request.into_settings();
+
+        let endpoint_configuration = self.generate_metrics_endpoint_configuration(dd_common)?;
         let service = ServiceBuilder::new()
             .settings(request_limits, DatadogMetricsRetryLogic)
             .service(DatadogMetricsService::new(
                 client,
-                self.default_api_key.as_str(),
+                dd_common.default_api_key.inner(),
             ));
 
         let request_builder = DatadogMetricsRequestBuilder::new(
@@ -205,14 +272,24 @@ impl DatadogMetricsConfig {
             self.default_namespace.clone(),
         )?;
 
-        let sink = DatadogMetricsSink::new(cx, service, request_builder, batcher_settings);
+        let protocol = self.get_protocol(dd_common);
+        let sink = DatadogMetricsSink::new(service, request_builder, batcher_settings, protocol);
 
         Ok(VectorSink::from_event_streamsink(sink))
+    }
+
+    fn get_protocol(&self, dd_common: &DatadogCommonConfig) -> String {
+        self.get_base_agent_endpoint(dd_common)
+            .parse::<Uri>()
+            .unwrap()
+            .scheme_str()
+            .unwrap_or("http")
+            .to_string()
     }
 }
 
 fn build_uri(host: &str, endpoint: &str) -> crate::Result<Uri> {
-    let result = format!("{}{}", host, endpoint)
+    let result = format!("{host}{endpoint}")
         .parse::<Uri>()
         .context(UriParseSnafu)?;
     Ok(result)

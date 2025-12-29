@@ -1,21 +1,23 @@
 use std::num::NonZeroUsize;
 
-use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
-use vector_lib::config::{LegacyKey, LogNamespace};
-use vector_lib::configurable::configurable_component;
-use vector_lib::lookup::owned_value_path;
+use vector_lib::{
+    codecs::decoding::{DeserializerConfig, FramingConfig},
+    config::{LegacyKey, LogNamespace},
+    configurable::configurable_component,
+    lookup::owned_value_path,
+};
 use vrl::value::Kind;
 
-use crate::aws::create_client;
-use crate::codecs::DecodingConfig;
-use crate::common::sqs::SqsClientBuilder;
-use crate::tls::TlsConfig;
 use crate::{
-    aws::{auth::AwsAuthentication, region::RegionOrEndpoint},
+    aws::{auth::AwsAuthentication, create_client, region::RegionOrEndpoint},
+    codecs::DecodingConfig,
+    common::sqs::SqsClientBuilder,
     config::{SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput},
     serde::{bool_or_struct, default_decoding, default_framing_message_based},
     sources::aws_sqs::source::SqsSource,
+    tls::TlsConfig,
 };
+use typetag;
 
 /// Configuration for the `aws_sqs` source.
 #[configurable_component(source("aws_sqs", "Collect logs from AWS SQS."))]
@@ -161,12 +163,13 @@ impl SourceConfig for AwsSqsConfig {
 impl AwsSqsConfig {
     async fn build_client(&self, cx: &SourceContext) -> crate::Result<aws_sdk_sqs::Client> {
         create_client::<SqsClientBuilder>(
+            &SqsClientBuilder {},
             &self.auth,
             self.region.region(),
             self.region.endpoint(),
             &cx.proxy,
-            &self.tls,
-            &None,
+            self.tls.as_ref(),
+            None,
         )
         .await
     }
