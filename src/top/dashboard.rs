@@ -1,26 +1,44 @@
-use super::{events::capture_key_press, state};
 use crossterm::{
+    ExecutableCommand,
+    cursor::Show,
     event::{DisableMouseCapture, EnableMouseCapture, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     tty::IsTty,
-    ExecutableCommand,
 };
 use num_format::{Locale, ToFormattedString};
+use std::{io::stdout, time::Duration};
+
 use number_prefix::NumberPrefix;
-use std::io::stdout;
-use tui::{
-    backend::{Backend, CrosstermBackend},
+use tokio::sync::oneshot;
+
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Span, Spans},
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
-    Frame, Terminal,
 };
+
+use super::{
+    events::capture_key_press,
+    state::{self, ConnectionStatus},
+};
+use crate::internal_telemetry::is_allocation_tracking_enabled;
 
 /// Format metrics, with thousands separation
 trait ThousandsFormatter {
     fn thousands_format(&self) -> String;
+}
+
+impl ThousandsFormatter for u32 {
+    fn thousands_format(&self) -> String {
+        match self {
+            0 => "--".into(),
+            _ => self.to_formatted_string(&Locale::en),
+        }
+    }
 }
 
 impl ThousandsFormatter for u64 {
@@ -55,7 +73,7 @@ impl HumanFormatter for i64 {
             0 => "--".into(),
             n => match NumberPrefix::decimal(*n as f64) {
                 NumberPrefix::Standalone(n) => n.to_string(),
-                NumberPrefix::Prefixed(p, n) => format!("{:.2} {}", n, p),
+                NumberPrefix::Prefixed(p, n) => format!("{n:.2} {p}"),
             },
         }
     }
@@ -67,23 +85,72 @@ impl HumanFormatter for i64 {
             0 => "--".into(),
             n => match NumberPrefix::binary(*n as f64) {
                 NumberPrefix::Standalone(n) => n.to_string(),
-                NumberPrefix::Prefixed(p, n) => format!("{:.2} {}B", n, p),
+                NumberPrefix::Prefixed(p, n) => format!("{n:.2} {p}B"),
             },
         }
     }
 }
 
-static HEADER: [&str; 6] = ["Name", "Kind", "Type", "Events", "Bytes", "Errors"];
+fn format_metric(total: i64, throughput: i64, human_metrics: bool) -> String {
+    match total {
+        0 => "N/A".to_string(),
+        v => format!(
+            "{} ({}/s)",
+            if human_metrics {
+                v.human_format()
+            } else {
+                v.thousands_format()
+            },
+            throughput.human_format()
+        ),
+    }
+}
+
+fn format_metric_bytes(total: i64, throughput: i64, human_metrics: bool) -> String {
+    match total {
+        0 => "N/A".to_string(),
+        v => format!(
+            "{} ({}/s)",
+            if human_metrics {
+                v.human_format_bytes()
+            } else {
+                v.thousands_format()
+            },
+            throughput.human_format_bytes()
+        ),
+    }
+}
+
+const NUM_COLUMNS: usize = if is_allocation_tracking_enabled() {
+    10
+} else {
+    9
+};
+
+static HEADER: [&str; NUM_COLUMNS] = [
+    "ID",
+    "Output",
+    "Kind",
+    "Type",
+    "Events In",
+    "Bytes In",
+    "Events Out",
+    "Bytes Out",
+    "Errors",
+    #[cfg(feature = "allocation-tracing")]
+    "Memory Used",
+];
 
 struct Widgets<'a> {
     constraints: Vec<Constraint>,
     url_string: &'a str,
     opts: &'a super::Opts,
+    title: &'a str,
 }
 
 impl<'a> Widgets<'a> {
     /// Creates a new Widgets, containing constraints to re-use across renders.
-    pub fn new(url_string: &'a str, opts: &'a super::Opts) -> Self {
+    pub fn new(title: &'a str, url_string: &'a str, opts: &'a super::Opts) -> Self {
         let constraints = vec![
             Constraint::Length(3),
             Constraint::Max(90),
@@ -94,21 +161,36 @@ impl<'a> Widgets<'a> {
             constraints,
             url_string,
             opts,
+            title,
         }
     }
 
-    /// Renders a title showing 'Vector', and the URL the dashboard is currently connected to.
-    fn title<B: Backend>(&'a self, f: &mut Frame<B>, area: Rect) {
-        let text = vec![Spans::from(vec![
+    /// Renders a title and the URL the dashboard is currently connected to.
+    fn title(
+        &'a self,
+        f: &mut Frame,
+        area: Rect,
+        connection_status: &ConnectionStatus,
+        uptime: Duration,
+    ) {
+        let mut text = vec![
             Span::from(self.url_string),
             Span::styled(
                 format!(" | Sampling @ {}ms", self.opts.interval.thousands_format()),
                 Style::default().fg(Color::Gray),
             ),
-        ])];
+            Span::from(" | "),
+        ];
+        text.extend(connection_status.as_ui_spans());
+        text.extend(vec![Span::from(format!(
+            " | Uptime: {}",
+            humantime::format_duration(uptime)
+        ))]);
+
+        let text = vec![Line::from(text)];
 
         let block = Block::default().borders(Borders::ALL).title(Span::styled(
-            "Vector",
+            self.title,
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -120,7 +202,7 @@ impl<'a> Widgets<'a> {
 
     /// Renders a components table, showing sources, transforms and sinks in tabular form, with
     /// statistics pulled from `ComponentsState`,
-    fn components_table<B: Backend>(&self, f: &mut Frame<B>, state: &state::State, area: Rect) {
+    fn components_table(&self, f: &mut Frame, state: &state::State, area: Rect) {
         // Header columns
         let header = HEADER
             .iter()
@@ -128,63 +210,107 @@ impl<'a> Widgets<'a> {
             .collect::<Vec<_>>();
 
         // Data columns
-        let items = state.iter().map(|(_, r)| {
-            let mut data = vec![r.name.clone(), r.kind.clone(), r.component_type.clone()];
+        let mut items = Vec::new();
+        for (_, r) in state.components.iter() {
+            let mut data = vec![
+                r.key.id().to_string(),
+                if !r.has_displayable_outputs() {
+                    "--"
+                } else {
+                    Default::default()
+                }
+                .to_string(),
+                r.kind.clone(),
+                r.component_type.clone(),
+            ];
 
             let formatted_metrics = [
-                match r.processed_events_total {
-                    0 => "N/A".to_string(),
-                    v => format!(
-                        "{} ({}/s)",
-                        if self.opts.human_metrics {
-                            v.human_format()
-                        } else {
-                            v.thousands_format()
-                        },
-                        r.processed_events_throughput_sec.human_format()
-                    ),
-                },
-                match r.processed_bytes_total {
-                    0 => "N/A".to_string(),
-                    v => format!(
-                        "{} ({}/s)",
-                        if self.opts.human_metrics {
-                            v.human_format_bytes()
-                        } else {
-                            v.thousands_format()
-                        },
-                        r.processed_bytes_throughput_sec.human_format_bytes()
-                    ),
-                },
+                format_metric(
+                    r.received_events_total,
+                    r.received_events_throughput_sec,
+                    self.opts.human_metrics,
+                ),
+                format_metric_bytes(
+                    r.received_bytes_total,
+                    r.received_bytes_throughput_sec,
+                    self.opts.human_metrics,
+                ),
+                format_metric(
+                    r.sent_events_total,
+                    r.sent_events_throughput_sec,
+                    self.opts.human_metrics,
+                ),
+                format_metric_bytes(
+                    r.sent_bytes_total,
+                    r.sent_bytes_throughput_sec,
+                    self.opts.human_metrics,
+                ),
                 if self.opts.human_metrics {
                     r.errors.human_format()
                 } else {
                     r.errors.thousands_format()
                 },
+                #[cfg(feature = "allocation-tracing")]
+                r.allocated_bytes.human_format_bytes(),
             ];
 
             data.extend_from_slice(&formatted_metrics);
-            Row::new(data).style(Style::default())
-        });
+            items.push(Row::new(data).style(Style::default()));
 
-        let w = Table::new(items)
+            // Add output rows
+            if r.has_displayable_outputs() {
+                for (id, output) in r.outputs.iter() {
+                    let sent_events_metric = format_metric(
+                        output.sent_events_total,
+                        output.sent_events_throughput_sec,
+                        self.opts.human_metrics,
+                    );
+                    let mut data = [""; NUM_COLUMNS]
+                        .into_iter()
+                        .map(Cell::from)
+                        .collect::<Vec<_>>();
+                    data[1] = Cell::from(id.as_str());
+                    data[5] = Cell::from(sent_events_metric);
+                    items.push(Row::new(data).style(Style::default()));
+                }
+            }
+        }
+
+        let widths: &[Constraint] = if is_allocation_tracking_enabled() {
+            &[
+                Constraint::Percentage(13), // ID
+                Constraint::Percentage(8),  // Output
+                Constraint::Percentage(4),  // Kind
+                Constraint::Percentage(9),  // Type
+                Constraint::Percentage(10), // Events In
+                Constraint::Percentage(12), // Bytes In
+                Constraint::Percentage(10), // Events Out
+                Constraint::Percentage(12), // Bytes Out
+                Constraint::Percentage(8),  // Errors
+                Constraint::Percentage(14), // Allocated Bytes
+            ]
+        } else {
+            &[
+                Constraint::Percentage(13), // ID
+                Constraint::Percentage(12), // Output
+                Constraint::Percentage(9),  // Kind
+                Constraint::Percentage(6),  // Type
+                Constraint::Percentage(12), // Events In
+                Constraint::Percentage(14), // Bytes In
+                Constraint::Percentage(12), // Events Out
+                Constraint::Percentage(14), // Bytes Out
+                Constraint::Percentage(8),  // Errors
+            ]
+        };
+        let w = Table::new(items, widths)
             .header(Row::new(header).bottom_margin(1))
             .block(Block::default().borders(Borders::ALL).title("Components"))
-            .column_spacing(2)
-            .widths(&[
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
-                Constraint::Percentage(10),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
-            ]);
-
+            .column_spacing(2);
         f.render_widget(w, area);
     }
 
     /// Alerts the user to resize the window to view columns
-    fn components_resize_window<B: Backend>(&self, f: &mut Frame<B>, area: Rect) {
+    fn components_resize_window(&self, f: &mut Frame, area: Rect) {
         let block = Block::default().borders(Borders::ALL).title("Components");
         let w = Paragraph::new("Expand the window to > 80 chars to view metrics")
             .block(block)
@@ -194,8 +320,8 @@ impl<'a> Widgets<'a> {
     }
 
     /// Renders a box showing instructions on how to exit from `vector top`.
-    fn quit_box<B: Backend>(&self, f: &mut Frame<B>, area: Rect) {
-        let text = vec![Spans::from("To quit, press ESC or 'q'")];
+    fn quit_box(&self, f: &mut Frame, area: Rect) {
+        let text = vec![Line::from("To quit, press ESC or 'q'")];
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -209,13 +335,13 @@ impl<'a> Widgets<'a> {
     }
 
     /// Draw a single frame. Creates a layout and renders widgets into it.
-    fn draw<B: Backend>(&self, f: &mut Frame<B>, state: state::State) {
-        let size = f.size();
+    fn draw(&self, f: &mut Frame, state: state::State) {
+        let size = f.area();
         let rects = Layout::default()
-            .constraints(self.constraints.as_ref())
+            .constraints(self.constraints.clone())
             .split(size);
 
-        self.title(f, rects[0]);
+        self.title(f, rects[0], &state.connection_status, state.uptime);
 
         // Require a minimum of 80 chars of line width to display the table
         if size.width >= 80 {
@@ -238,9 +364,11 @@ pub fn is_tty() -> bool {
 /// as well as entering an 'alternate screen' to overlay the console. This ensures that when
 /// the dashboard is exited, the user's previous terminal session can commence, unaffected.
 pub async fn init_dashboard<'a>(
+    title: &'a str,
     url: &'a str,
     opts: &'a super::Opts,
     mut state_rx: state::StateRx,
+    mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Capture key presses, to determine when to quit
     let (mut key_press_rx, key_press_kill_tx) = capture_key_press();
@@ -261,7 +389,7 @@ pub async fn init_dashboard<'a>(
     // Clear the screen, readying it for output
     terminal.clear()?;
 
-    let widgets = Widgets::new(url, opts);
+    let widgets = Widgets::new(title, url, opts);
 
     loop {
         tokio::select! {
@@ -270,9 +398,13 @@ pub async fn init_dashboard<'a>(
             },
             k = key_press_rx.recv() => {
                 if let KeyCode::Esc | KeyCode::Char('q') = k.unwrap() {
-                    let _ = key_press_kill_tx.send(());
+                    _ = key_press_kill_tx.send(());
                     break
                 }
+            }
+            _ = &mut shutdown_rx => {
+                _ = key_press_kill_tx.send(());
+                break
             }
         }
     }
@@ -280,6 +412,7 @@ pub async fn init_dashboard<'a>(
     // Clean-up terminal
     terminal.backend_mut().execute(DisableMouseCapture)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.backend_mut().execute(Show)?;
 
     disable_raw_mode()?;
 

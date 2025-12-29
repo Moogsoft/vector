@@ -1,137 +1,248 @@
 #![recursion_limit = "256"] // for async-stream
+#![deny(unreachable_pub)]
+#![deny(unused_extern_crates)]
+#![deny(unused_allocation)]
+#![deny(unused_assignments)]
+#![deny(unused_comparisons)]
+#![deny(warnings)]
+#![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg), deny(rustdoc::broken_intra_doc_links))]
+#![allow(async_fn_in_trait)]
 #![allow(clippy::approx_constant)]
 #![allow(clippy::float_cmp)]
-#![allow(clippy::blocks_in_if_conditions)]
 #![allow(clippy::match_wild_err_arm)]
 #![allow(clippy::new_ret_no_self)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::trivial_regex)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::unit_arg)]
 #![deny(clippy::clone_on_ref_ptr)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
+#![deny(clippy::disallowed_methods)] // [nursery] mark some functions as verboten
+#![deny(clippy::missing_const_for_fn)] // [nursery] valuable to the optimizer, but may produce false positives
 
+//! The main library to support building Vector.
+
+#[cfg(all(unix, feature = "sinks-socket"))]
 #[macro_use]
-extern crate tracing;
+extern crate cfg_if;
 #[macro_use]
 extern crate derivative;
 #[macro_use]
-extern crate pest_derive;
-#[cfg(feature = "vrl-cli")]
-extern crate remap_cli;
+extern crate tracing;
+#[macro_use]
+extern crate vector_lib;
 
-#[cfg(feature = "jemallocator")]
+pub use indoc::indoc;
+
+#[cfg(all(feature = "tikv-jemallocator", not(feature = "allocation-tracing")))]
 #[global_allocator]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "tikv-jemallocator", feature = "allocation-tracing"))]
+#[global_allocator]
+static ALLOC: self::internal_telemetry::allocations::Allocator<tikv_jemallocator::Jemalloc> =
+    self::internal_telemetry::allocations::get_grouped_tracing_allocator(
+        tikv_jemallocator::Jemalloc,
+    );
+
+#[allow(unreachable_pub)]
+pub mod internal_telemetry;
 
 #[macro_use]
+#[allow(unreachable_pub)]
 pub mod config;
-pub mod buffers;
 pub mod cli;
+#[allow(unreachable_pub)]
+pub mod components;
 pub mod conditions;
 pub mod dns;
-pub mod event;
+#[cfg(feature = "docker")]
+pub mod docker;
 pub mod expiring_hash_map;
 pub mod generate;
-#[cfg(feature = "wasm")]
-pub mod wasm;
+pub mod generate_schema;
 #[macro_use]
+#[allow(unreachable_pub)]
 pub mod internal_events;
+#[cfg(feature = "lapin")]
+pub mod amqp;
 #[cfg(feature = "api")]
+#[allow(unreachable_pub)]
 pub mod api;
 pub mod app;
 pub mod async_read;
+#[cfg(feature = "aws-config")]
+pub mod aws;
+#[allow(unreachable_pub)]
+pub mod codecs;
+pub mod common;
+mod convert_config;
+pub mod encoding_transcode;
+pub mod enrichment_tables;
+pub mod extra_context;
+#[cfg(feature = "gcp")]
+pub mod gcp;
+pub(crate) mod graph;
 pub mod heartbeat;
 pub mod http;
-#[cfg(feature = "rdkafka")]
+#[allow(unreachable_pub)]
+#[cfg(any(feature = "sources-kafka", feature = "sinks-kafka"))]
 pub mod kafka;
+#[allow(unreachable_pub)]
 pub mod kubernetes;
 pub mod line_agg;
 pub mod list;
-pub mod mapping;
-pub mod metrics;
-pub(crate) mod pipeline;
-#[cfg(any(feature = "sinks-prometheus", feature = "sources-prometheus"))]
-pub(crate) mod prometheus;
-#[cfg(feature = "rusoto_core")]
-pub mod rusoto;
+mod moog_version;
+#[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
+pub mod nats;
+pub mod net;
+#[allow(unreachable_pub)]
+pub(crate) mod proto;
+pub mod providers;
+pub mod secrets;
 pub mod serde;
+#[cfg(windows)]
 pub mod service;
-pub mod shutdown;
 pub mod signal;
-pub mod sink;
+pub(crate) mod sink_ext;
+#[allow(unreachable_pub)]
 pub mod sinks;
+pub mod source_sender;
+#[allow(unreachable_pub)]
 pub mod sources;
-pub mod stream;
-pub mod tcp;
+pub mod stats;
+#[cfg(feature = "api-client")]
+#[allow(unreachable_pub)]
+pub mod tap;
 pub mod template;
 pub mod test_util;
-pub mod tls;
 #[cfg(feature = "api-client")]
+#[allow(unreachable_pub)]
 pub mod top;
+#[allow(unreachable_pub)]
 pub mod topology;
 pub mod trace;
+#[allow(unreachable_pub)]
 pub mod transforms;
-pub mod trigger;
 pub mod types;
 pub mod unit_test;
+pub(crate) mod utilization;
 pub mod validate;
 #[cfg(windows)]
 pub mod vector_windows;
 
-pub use event::{Event, Value};
-pub use pipeline::Pipeline;
+use crate::moog_version::moog_version;
+pub use source_sender::SourceSender;
+pub use vector_lib::{Error, Result, event, metrics, schema, shutdown, tcp, tls};
 
-pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+static APP_NAME_SLUG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-pub type Result<T> = std::result::Result<T, Error>;
+/// The name used to identify this Vector application.
+///
+/// This can be set at compile-time through the VECTOR_APP_NAME env variable.
+/// Defaults to "Vector".
+pub fn get_app_name() -> &'static str {
+    option_env!("VECTOR_APP_NAME").unwrap_or("Vector")
+}
 
+/// Returns a slugified version of the name used to identify this Vector application.
+///
+/// Defaults to "vector".
+pub fn get_slugified_app_name() -> String {
+    APP_NAME_SLUG
+        .get_or_init(|| get_app_name().to_lowercase().replace(' ', "-"))
+        .clone()
+}
+
+/// The current version of Vector in simplified format.
+/// `<version-number>-nightly`.
 pub fn vector_version() -> impl std::fmt::Display {
-    #[cfg(feature = "nightly")]
-    let pkg_version = format!("{}-nightly", built_info::PKG_VERSION);
+    // #[cfg(feature = "nightly")]
+    // let pkg_version = format!("{}-nightly", built_info::PKG_VERSION);
 
-    #[cfg(not(feature = "nightly"))]
-    let pkg_version = built_info::PKG_VERSION;
-
-    pkg_version
+    // #[cfg(not(feature = "nightly"))]
+    // let pkg_version = match built_info::DEBUG {
+    // // If any debug info is included, consider it a non-release build.
+    // "1" | "2" | "true" => {
+    //     format!(
+    //         "{}-custom-{}",
+    //         built_info::PKG_VERSION,
+    //         built_info::GIT_SHORT_HASH
+    //     )
+    // }
+    // _ => built_info::PKG_VERSION.to_string(),
+    // };
+    // let pkg_version = built_info::VECTOR_VERSION.to_string();
+    "0.50.0".to_string()
 }
 
+/// Returns a string containing full version information of the current build.
 pub fn get_version() -> String {
-    let pkg_version = vector_version();
-    let commit_hash = built_info::GIT_VERSION.and_then(|v| v.split('-').last());
-    let built_date = chrono::DateTime::parse_from_rfc2822(built_info::BUILT_TIME_UTC)
-        .unwrap()
-        .format("%Y-%m-%d");
-    let built_string = if let Some(commit_hash) = commit_hash {
-        format!("{} {} {}", commit_hash, built_info::TARGET, built_date)
-    } else {
-        built_info::TARGET.into()
+    let pkg_version = moog_version();
+    let build_desc = built_info::VECTOR_BUILD_DESC;
+    let build_string = match build_desc {
+        Some(desc) => format!("{} {}", built_info::TARGET, desc),
+        None => built_info::TARGET.into(),
     };
-    format!("{} ({})", pkg_version, built_string)
+
+    // We do not add 'debug' to the BUILD_DESC unless the caller has flagged on line
+    // or full debug symbols. See the Cargo Book profiling section for value meaning:
+    // https://doc.rust-lang.org/cargo/reference/profiles.html#debug
+    let build_string = match built_info::DEBUG {
+        "1" => format!("{build_string} debug=line"),
+        "2" | "true" => format!("{build_string} debug=full"),
+        _ => build_string,
+    };
+
+    let vector_version = vector_version();
+    format!("{pkg_version} ({build_string}) vector {vector_version}")
 }
 
-#[allow(unused)]
-mod built_info {
+/// Includes information about the current build.
+#[allow(warnings)]
+pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
+/// Returns the host name of the current system.
+/// The hostname can be overridden by setting the VECTOR_HOSTNAME environment variable.
 pub fn get_hostname() -> std::io::Result<String> {
-    Ok(hostname::get()?.to_string_lossy().into())
+    Ok(if let Ok(hostname) = std::env::var("VECTOR_HOSTNAME") {
+        hostname.to_string()
+    } else {
+        hostname::get()?.to_string_lossy().into_owned()
+    })
 }
 
-// This is a private implementation of the unstable `bool_to_option`
-// feature. This can be removed once this stabilizes:
-// https://github.com/rust-lang/rust/issues/64260
-trait BoolAndSome {
-    fn and_some<T>(self, value: T) -> Option<T>;
+/// Spawn a task with the given name. The name is only used if
+/// built with [`tokio_unstable`][tokio_unstable].
+///
+/// [tokio_unstable]: https://docs.rs/tokio/latest/tokio/#unstable-features
+#[track_caller]
+pub(crate) fn spawn_named<T>(
+    task: impl std::future::Future<Output = T> + Send + 'static,
+    _name: &str,
+) -> tokio::task::JoinHandle<T>
+where
+    T: Send + 'static,
+{
+    #[cfg(tokio_unstable)]
+    return tokio::task::Builder::new()
+        .name(_name)
+        .spawn(task)
+        .expect("tokio task should spawn");
+
+    #[cfg(not(tokio_unstable))]
+    tokio::spawn(task)
 }
 
-impl BoolAndSome for bool {
-    fn and_some<T>(self, value: T) -> Option<T> {
-        if self {
-            Some(value)
-        } else {
-            None
+/// Returns an estimate of the number of recommended threads that Vector should spawn.
+pub fn num_threads() -> usize {
+    let count = match std::thread::available_parallelism() {
+        Ok(count) => count,
+        Err(error) => {
+            warn!(message = "Failed to determine available parallelism for thread count, defaulting to 1.", %error);
+            std::num::NonZeroUsize::new(1).unwrap()
         }
-    }
+    };
+    usize::from(count)
 }

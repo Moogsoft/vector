@@ -19,8 +19,8 @@ TARGET="${TARGET:?"You must specify a target triple, ex: x86_64-apple-darwin"}"
 #
 
 PROJECT_ROOT="$(pwd)"
-PACKAGE_VERSION="${VECTOR_VERSION:-"$("$PROJECT_ROOT"/scripts/version.sh)"}"
-ARCHIVE_NAME="vector-$PACKAGE_VERSION-$TARGET.tar.gz"
+PACKAGE_VERSION="${VECTOR_VERSION:-"$(cargo vdev version)"}"
+ARCHIVE_NAME="collector-${PACKAGE_VERSION}-$TARGET.tar.gz"
 ARCHIVE_PATH="target/artifacts/$ARCHIVE_NAME"
 ABSOLUTE_ARCHIVE_PATH="$PROJECT_ROOT/$ARCHIVE_PATH"
 
@@ -40,7 +40,7 @@ td="$(mktemp -d)"
 pushd "$td"
 tar -xvf "$ABSOLUTE_ARCHIVE_PATH"
 mkdir -p "$PROJECT_ROOT/target/$TARGET/release"
-mv "vector-$TARGET/bin/vector" "$PROJECT_ROOT/target/$TARGET/release"
+mv "collector-$TARGET/bin/collector" "$PROJECT_ROOT/target/$TARGET/release"
 popd
 rm -rf "$td"
 
@@ -53,13 +53,13 @@ df -h
 
 # Create short plain-text extended description for the package
 EXPANDED_LINK_ALIASED="$(cmark-gfm "$PROJECT_ROOT/README.md" --to commonmark)" # expand link aliases
-TEXT_BEFORE_FIRST_HEADER="$(sed '/^## /Q' <<< "$EXPANDED_LINK_ALIASED")" # select text before first header
-PLAIN_TEXT="$(cmark-gfm --to plaintext <<< "$TEXT_BEFORE_FIRST_HEADER")" # convert to plain text
-FORMATTED="$(fmt -uw 80 <<< "$PLAIN_TEXT")"
-cat <<< "$FORMATTED" > "$PROJECT_ROOT/target/debian-extended-description.txt"
+TEXT_BEFORE_FIRST_HEADER="$(sed '/^## /Q' <<<"$EXPANDED_LINK_ALIASED")"        # select text before first header
+PLAIN_TEXT="$(cmark-gfm --to plaintext <<<"$TEXT_BEFORE_FIRST_HEADER")"        # convert to plain text
+FORMATTED="$(fmt -uw 80 <<<"$PLAIN_TEXT")"
+cat <<<"$FORMATTED" >"$PROJECT_ROOT/target/debian-extended-description.txt"
 
 # Create the license file for binary distributions (LICENSE + NOTICE)
-cat LICENSE NOTICE > "$PROJECT_ROOT/target/debian-license.txt"
+cat LICENSE NOTICE >"$PROJECT_ROOT/target/debian-license.txt"
 
 #
 # Build the deb
@@ -69,16 +69,23 @@ cat LICENSE NOTICE > "$PROJECT_ROOT/target/debian-license.txt"
 #     the deb can run, including the architecture
 #
 #   --no-build
-#     because this stop should follow a build
+#     because this step should follow a build
 
-cargo deb --target "$TARGET" --deb-version "$PACKAGE_VERSION" --no-build --no-strip
+# TODO: Remove this after the Vector docker image contains a newer cargo-deb version.
+#       Temporary override of cargo-deb to support Rust 2024 edition.
+if [[ "$(cargo-deb --version 2>/dev/null)" != "2.9.3" ]]; then
+  cargo install cargo-deb --version 2.9.3 --force --locked
+fi
+cargo deb --target "$TARGET" --deb-version "${PACKAGE_VERSION}-1" --variant "$TARGET" --no-build --no-strip
 
-# Rename the resulting .deb file to use - instead of _ since this
-# is consistent with our package naming scheme.
+# Rename the resulting .deb file to remove TARGET from name.
 for file in target/"${TARGET}"/debian/*.deb; do
-  base=$(basename "${file}")
-  nbase=${base//_/-}
-  mv "${file}" target/"${TARGET}"/debian/"${nbase}";
+  base=$(basename "${file}" | sed 's/vector/collector/')
+  nbase=${base//-${TARGET}/}
+  # the file won't have TARGET in its name if not a "variant"
+  if [[ "${file}" != target/"${TARGET}"/debian/"${nbase}" ]]; then
+    mv "${file}" target/"${TARGET}"/debian/"${nbase}"
+  fi
 done
 
 #

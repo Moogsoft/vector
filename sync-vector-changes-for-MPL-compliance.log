@@ -1,0 +1,185 @@
+Mon Dec 29 10:45:04 UTC 2025
+On branch win32
+Your branch is up to date with 'origin/win32'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   Cargo.lock
+	modified:   Cargo.toml
+	modified:   Makefile
+	modified:   distribution/msi/build.sh
+	modified:   distribution/rpm/vector.spec
+	new file:   lib/codecs/src/encoding/format/protobuf.rs
+	modified:   lib/file-source/src/file_server.rs
+	new file:   lib/vector-core/src/tls/settings.rs
+	modified:   scripts/build.sh
+	new file:   scripts/check-one-feature
+	new file:   scripts/environment/bootstrap-ubuntu-24.04.sh
+	modified:   scripts/environment/setup-helm.sh
+	modified:   scripts/package-archive.sh
+	modified:   scripts/package-deb.sh
+	modified:   scripts/package-msi.sh
+	modified:   scripts/package-rpm.sh
+	modified:   scripts/release-s3.sh
+	modified:   src/cli.rs
+	new file:   src/config/sink.rs
+	new file:   src/config/source.rs
+	new file:   src/config/transform.rs
+	new file:   src/config/unit_test/unit_test_components.rs
+	new file:   src/enrichment_tables/memory/config.rs
+	modified:   src/internal_events/mod.rs
+	modified:   src/lib.rs
+	modified:   src/main.rs
+	new file:   src/providers/mod.rs
+	modified:   src/signal.rs
+	new file:   src/sinks/amqp/config.rs
+	new file:   src/sinks/appsignal/config.rs
+	new file:   src/sinks/aws_cloudwatch_logs/config.rs
+	new file:   src/sinks/aws_cloudwatch_metrics/mod.rs
+	new file:   src/sinks/aws_kinesis/firehose/config.rs
+	new file:   src/sinks/aws_kinesis/streams/config.rs
+	new file:   src/sinks/aws_s3/config.rs
+	new file:   src/sinks/aws_s_s/sns/config.rs
+	new file:   src/sinks/aws_s_s/sqs/config.rs
+	new file:   src/sinks/axiom.rs
+	new file:   src/sinks/azure_blob/config.rs
+	new file:   src/sinks/azure_monitor_logs/config.rs
+	new file:   src/sinks/blackhole/config.rs
+	new file:   src/sinks/clickhouse/config.rs
+	new file:   src/sinks/console/config.rs
+	new file:   src/sinks/databend/config.rs
+	new file:   src/sinks/datadog/events/config.rs
+	new file:   src/sinks/datadog/metrics/config.rs
+	new file:   src/sinks/datadog/traces/config.rs
+	new file:   src/sinks/elasticsearch/config.rs
+	modified:   src/sinks/file/mod.rs
+	modified:   src/sinks/gcp/cloud_storage.rs
+	modified:   src/sinks/gcp/pubsub.rs
+	new file:   src/sinks/gcp/stackdriver/metrics/config.rs
+	new file:   src/sinks/gcp_chronicle/chronicle_unstructured.rs
+	new file:   src/sinks/greptimedb/metrics/config.rs
+	new file:   src/sinks/honeycomb/config.rs
+	new file:   src/sinks/http/config.rs
+	modified:   src/sinks/humio/logs.rs
+	modified:   src/sinks/humio/metrics.rs
+	modified:   src/sinks/influxdb/logs.rs
+	modified:   src/sinks/influxdb/metrics.rs
+	new file:   src/sinks/kafka/config.rs
+	new file:   src/sinks/keep/config.rs
+	new file:   src/sinks/loki/config.rs
+	new file:   src/sinks/mezmo.rs
+	new file:   src/sinks/mqtt/config.rs
+	new file:   src/sinks/nats/config.rs
+	new file:   src/sinks/new_relic/config.rs
+	new file:   src/sinks/new_relic/healthcheck.rs
+	new file:   src/sinks/opentelemetry/mod.rs
+	modified:   src/sinks/papertrail.rs
+	new file:   src/sinks/postgres/config.rs
+	modified:   src/sinks/prometheus/exporter.rs
+	new file:   src/sinks/prometheus/remote_write/config.rs
+	new file:   src/sinks/pulsar/config.rs
+	new file:   src/sinks/redis/config.rs
+	modified:   src/sinks/sematext/logs.rs
+	modified:   src/sinks/sematext/metrics.rs
+	modified:   src/sinks/socket.rs
+	new file:   src/sinks/splunk_hec/metrics/config.rs
+	new file:   src/sinks/statsd/config.rs
+	modified:   src/sinks/util/adaptive_concurrency/tests.rs
+	modified:   src/sinks/util/retries.rs
+	new file:   src/sinks/vector/config.rs
+	new file:   src/sinks/webhdfs/config.rs
+	new file:   src/sinks/websocket/config.rs
+	new file:   src/sinks/websocket_server/config.rs
+	new file:   src/sources/amqp.rs
+	modified:   src/sources/apache_metrics/mod.rs
+	modified:   src/sources/aws_ecs_metrics/mod.rs
+	modified:   src/sources/aws_kinesis_firehose/mod.rs
+	modified:   src/sources/aws_s3/mod.rs
+	new file:   src/sources/aws_sqs/config.rs
+	new file:   src/sources/datadog_agent/mod.rs
+	new file:   src/sources/demo_logs.rs
+	new file:   src/sources/dnstap/mod.rs
+	new file:   src/sources/docker_logs/mod.rs
+	new file:   src/sources/eventstoredb_metrics/mod.rs
+	new file:   src/sources/exec/mod.rs
+	modified:   src/sources/file.rs
+	new file:   src/sources/file_descriptors/file_descriptor.rs
+	new file:   src/sources/file_descriptors/stdin.rs
+	new file:   src/sources/fluent/mod.rs
+	new file:   src/sources/gcp_pubsub.rs
+	modified:   src/sources/heroku_logs.rs
+	new file:   src/sources/host_metrics/mod.rs
+	new file:   src/sources/http_client/client.rs
+	new file:   src/sources/http_server.rs
+	modified:   src/sources/internal_logs.rs
+	modified:   src/sources/internal_metrics.rs
+	modified:   src/sources/journald.rs
+	modified:   src/sources/kafka.rs
+	modified:   src/sources/kubernetes_logs/mod.rs
+	new file:   src/sources/logstash.rs
+	modified:   src/sources/mod.rs
+	modified:   src/sources/mongodb_metrics/mod.rs
+	new file:   src/sources/mqtt/config.rs
+	new file:   src/sources/nats/config.rs
+	modified:   src/sources/nginx_metrics/mod.rs
+	new file:   src/sources/okta/client.rs
+	new file:   src/sources/opentelemetry/config.rs
+	new file:   src/sources/postgresql_metrics.rs
+	new file:   src/sources/prometheus/pushgateway.rs
+	modified:   src/sources/prometheus/remote_write.rs
+	modified:   src/sources/prometheus/scrape.rs
+	new file:   src/sources/pulsar.rs
+	new file:   src/sources/redis/mod.rs
+	modified:   src/sources/socket/mod.rs
+	new file:   src/sources/splunk_hec/mod.rs
+	new file:   src/sources/static_metrics.rs
+	modified:   src/sources/statsd/mod.rs
+	modified:   src/sources/syslog.rs
+	new file:   src/sources/vector/mod.rs
+	new file:   src/sources/websocket/config.rs
+	new file:   src/test_util/mock/sinks/backpressure.rs
+	new file:   src/test_util/mock/sinks/basic.rs
+	new file:   src/test_util/mock/sinks/error.rs
+	new file:   src/test_util/mock/sinks/oneshot.rs
+	new file:   src/test_util/mock/sinks/panic.rs
+	new file:   src/test_util/mock/sources/backpressure.rs
+	new file:   src/test_util/mock/sources/basic.rs
+	new file:   src/test_util/mock/sources/error.rs
+	new file:   src/test_util/mock/sources/panic.rs
+	new file:   src/test_util/mock/sources/tripwire.rs
+	new file:   src/test_util/mock/transforms/basic.rs
+	new file:   src/test_util/mock/transforms/error_definitions.rs
+	new file:   src/test_util/mock/transforms/noop.rs
+	modified:   src/top/dashboard.rs
+	new file:   src/transforms/aggregate.rs
+	modified:   src/transforms/aws_ec2_metadata.rs
+	new file:   src/transforms/dedupe/config.rs
+	new file:   src/transforms/exclusive_route/config.rs
+	modified:   src/transforms/filter.rs
+	new file:   src/transforms/incremental_to_absolute.rs
+	modified:   src/transforms/log_to_metric.rs
+	modified:   src/transforms/lua/mod.rs
+	modified:   src/transforms/metric_to_log.rs
+	modified:   src/transforms/mod.rs
+	new file:   src/transforms/reduce/config.rs
+	modified:   src/transforms/remap.rs
+	new file:   src/transforms/route.rs
+	new file:   src/transforms/sample/config.rs
+	new file:   src/transforms/tag_cardinality_limit/config.rs
+	new file:   src/transforms/throttle/config.rs
+	new file:   src/transforms/window/config.rs
+	modified:   tests/data/adaptive-concurrency/defers-at-high-rate.toml
+	new file:   tests/integration/cli.rs
+	new file:   tests/integration/shutdown.rs
+	new file:   vdev/src/app.rs
+	new file:   vdev/src/commands/check/examples.rs
+	new file:   vdev/src/commands/release/prepare.rs
+	new file:   vdev/src/features.rs
+	new file:   vdev/src/testing/config.rs
+	new file:   website/cue/reference/remap/functions/encrypt_ip.cue
+	new file:   website/cue/reference/remap/functions/xxhash.cue
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	sync-vector-changes-for-MPL-compliance.log
+

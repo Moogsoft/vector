@@ -10,10 +10,9 @@ set -euo pipefail
 # ENV VARS
 #
 #   $OVERWRITE      overwrite Vector binary even if it already exists (default "true")
-#   $CHANNEL        the release channel for the build, "nightly" or "stable" (default `scripts/release-channel.sh`)
+#   $CHANNEL        the release channel for the build, "nightly" or "stable" (default `cargo vdev release channel`)
 #   $FEATURES       a list of Vector features to include when building (default "default")
 #   $NATIVE_BUILD   whether to pass the --target flag when building via cargo (default "true")
-#   $KEEP_SYMBOLS   whether to keep the any debug symbols in the binaries or not (default "true")
 #   $TARGET         a target triple. ex: x86_64-apple-darwin (no default)
 
 #
@@ -23,10 +22,9 @@ set -euo pipefail
 OVERWRITE=${OVERWRITE:-"true"}
 FEATURES="${FEATURES:-"default"}"
 NATIVE_BUILD="${NATIVE_BUILD:-"true"}"
-KEEP_SYMBOLS=${KEEP_SYMBOLS:-"true"}
 TARGET="${TARGET:?"You must specify a target triple, ex: x86_64-apple-darwin"}"
 
-CHANNEL=${CHANNEL:-"$(scripts/release-channel.sh)"}
+CHANNEL=${CHANNEL:-"$(cargo vdev release channel)"}
 if [ "$CHANNEL" == "nightly" ]; then
   FEATURES="$FEATURES nightly"
 fi
@@ -41,7 +39,7 @@ else
   TARGET_DIR="target"
 fi
 
-BINARY_PATH="$TARGET_DIR/release/vector"
+BINARY_PATH="$TARGET_DIR/release/collector"
 
 #
 # Abort early if possible
@@ -58,6 +56,12 @@ if [ -f "$BINARY_PATH" ] && [ "$OVERWRITE" == "false" ]; then
 fi
 
 #
+# CFLAGS
+#
+
+export CFLAGS="$CFLAGS -g0 -O3"
+
+#
 # Header
 #
 
@@ -65,7 +69,6 @@ echo "Building Vector binary"
 echo "OVERWRITE: $OVERWRITE"
 echo "FEATURES: $FEATURES"
 echo "NATIVE_BUILD: $NATIVE_BUILD"
-echo "KEEP_SYMBOLS: $KEEP_SYMBOLS"
 echo "TARGET: $TARGET"
 echo "Binary path: $BINARY_PATH"
 
@@ -80,15 +83,7 @@ if [ "$NATIVE_BUILD" != "true" ]; then
 fi
 
 if [ "$FEATURES" == "default" ]; then
-  cargo build "${BUILD_FLAGS[@]}"
+  cargo build "${BUILD_FLAGS[@]}" --bin collector
 else
-  cargo build "${BUILD_FLAGS[@]}" --no-default-features --features "$FEATURES"
-fi
-
-#
-# Strip the output binary
-#
-
-if [ "$KEEP_SYMBOLS" == "false" ]; then
-  strip "$BINARY_PATH"
+  cargo build "${BUILD_FLAGS[@]}" --no-default-features --features "$FEATURES" --bin collector
 fi

@@ -1,123 +1,175 @@
+use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
+use indoc::indoc;
+use vector_lib::{configurable::configurable_component, sensitive_string::SensitiveString};
+use vrl::event_path;
+
 use super::Region;
 use crate::{
-    config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
-    sinks::elasticsearch::{ElasticSearchConfig, Encoding},
-    sinks::util::{
-        encoding::EncodingConfigWithDefault, http::RequestConfig, BatchConfig, Compression,
-        TowerRequestConfig,
+    codecs::Transformer,
+    config::{AcknowledgementsConfig, GenerateConfig, Input, SinkConfig, SinkContext},
+    event::EventArray,
+    sinks::{
+        Healthcheck, VectorSink,
+        elasticsearch::{BulkConfig, ElasticsearchApiVersion, ElasticsearchConfig},
+        util::{
+            BatchConfig, Compression, RealtimeSizeBasedDefaultBatchSettings, StreamSink,
+            TowerRequestConfig, http::RequestConfig,
+        },
     },
-    sinks::{Healthcheck, VectorSink},
-    Event,
+    template::Template,
 };
-use futures::{
-    future::{self, BoxFuture},
-    FutureExt, SinkExt,
-};
-use serde::{Deserialize, Serialize};
+use typetag;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Configuration for the `sematext_logs` sink.
+#[configurable_component(sink("sematext_logs", "Publish log events to Sematext."))]
+#[derive(Clone, Debug)]
 pub struct SematextLogsConfig {
-    region: Option<Region>,
-    // Deprecated name
+    #[serde(default = "super::default_region")]
+    #[configurable(derived)]
+    region: Region,
+
+    /// The endpoint to send data to.
+    ///
+    /// Setting this option overrides the `region` option.
     #[serde(alias = "host")]
+    #[configurable(metadata(docs::examples = "http://127.0.0.1"))]
+    #[configurable(metadata(docs::examples = "https://example.com"))]
     endpoint: Option<String>,
-    token: String,
 
-    #[serde(
-        skip_serializing_if = "crate::serde::skip_serializing_if_default",
-        default
-    )]
-    pub encoding: EncodingConfigWithDefault<Encoding>,
+    /// The token that is used to write to Sematext.
+    #[configurable(metadata(docs::examples = "${SEMATEXT_TOKEN}"))]
+    #[configurable(metadata(docs::examples = "some-sematext-token"))]
+    token: SensitiveString,
 
+    #[configurable(derived)]
+    #[serde(skip_serializing_if = "crate::serde::is_default", default)]
+    pub encoding: Transformer,
+
+    #[configurable(derived)]
     #[serde(default)]
     request: TowerRequestConfig,
 
+    #[configurable(derived)]
     #[serde(default)]
-    batch: BatchConfig,
-}
+    batch: BatchConfig<RealtimeSizeBasedDefaultBatchSettings>,
 
-inventory::submit! {
-    SinkDescription::new::<SematextLogsConfig>("sematext_logs")
+    #[configurable(derived)]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde::bool_or_struct",
+        skip_serializing_if = "crate::serde::is_default"
+    )]
+    acknowledgements: AcknowledgementsConfig,
 }
 
 impl GenerateConfig for SematextLogsConfig {
     fn generate_config() -> toml::Value {
-        toml::from_str(
-            r#"region = "us"
-            token = "${SEMATEXT_TOKEN}""#,
-        )
+        toml::from_str(indoc! {r#"
+            token = "${SEMATEXT_TOKEN}"
+        "#})
         .unwrap()
     }
 }
+
+// https://sematext.com/docs/logs/index-events-via-elasticsearch-api/
+const US_ENDPOINT: &str = "https://logsene-receiver.sematext.com";
+const EU_ENDPOINT: &str = "https://logsene-receiver.eu.sematext.com";
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "sematext_logs")]
 impl SinkConfig for SematextLogsConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let endpoint = match (&self.endpoint, &self.region) {
-            (Some(host), None) => host.clone(),
-            (None, Some(Region::Us)) => "https://logsene-receiver.sematext.com".to_owned(),
-            (None, Some(Region::Eu)) => "https://logsene-receiver.eu.sematext.com".to_owned(),
-            (None, None) => "https://logsene-receiver.sematext.com".to_owned(),
-            (Some(_), Some(_)) => {
-                return Err("Only one of `region` and `host` can be set.".into());
-            }
+            (Some(endpoint), _) => endpoint.clone(),
+            (None, Region::Us) => US_ENDPOINT.to_owned(),
+            (None, Region::Eu) => EU_ENDPOINT.to_owned(),
         };
 
-        let (sink, healthcheck) = ElasticSearchConfig {
-            endpoint,
+        let (sink, healthcheck) = ElasticsearchConfig {
+            endpoints: vec![endpoint],
             compression: Compression::None,
-            doc_type: Some("logs".to_string()),
-            index: Some(self.token.clone()),
+            doc_type: "\
+                logs"
+                .to_string(),
+            bulk: BulkConfig {
+                index: Template::try_from(self.token.inner())
+                    .expect("unable to parse token as Template"),
+                ..Default::default()
+            },
             batch: self.batch,
             request: RequestConfig {
                 tower: self.request,
                 ..Default::default()
             },
             encoding: self.encoding.clone(),
+            api_version: ElasticsearchApiVersion::V6,
             ..Default::default()
         }
         .build(cx)
         .await?;
 
-        let sink = Box::new(sink.into_sink().with(map_timestamp));
+        let stream = sink.into_stream();
+        let mapped_stream = MapTimestampStream { inner: stream };
 
-        Ok((VectorSink::Sink(sink), healthcheck))
+        Ok((VectorSink::Stream(Box::new(mapped_stream)), healthcheck))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Log
+    fn input(&self) -> Input {
+        Input::log()
     }
 
-    fn sink_type(&self) -> &'static str {
-        "sematext_logs"
+    fn acknowledgements(&self) -> &AcknowledgementsConfig {
+        &self.acknowledgements
+    }
+}
+
+struct MapTimestampStream {
+    inner: Box<dyn StreamSink<EventArray> + Send>,
+}
+
+#[async_trait]
+impl StreamSink<EventArray> for MapTimestampStream {
+    async fn run(self: Box<Self>, input: BoxStream<'_, EventArray>) -> Result<(), ()> {
+        let mapped_input = input.map(map_timestamp).boxed();
+        self.inner.run(mapped_input).await
     }
 }
 
 /// Used to map `timestamp` to `@timestamp`.
-fn map_timestamp(mut event: Event) -> BoxFuture<'static, Result<Event, ()>> {
-    let log = event.as_mut_log();
+fn map_timestamp(mut events: EventArray) -> EventArray {
+    match &mut events {
+        EventArray::Logs(logs) => {
+            for log in logs {
+                if let Some(path) = log.timestamp_path().cloned().as_ref() {
+                    log.rename_key(path, event_path!("@timestamp"));
+                }
 
-    if let Some(ts) = log.remove(crate::config::log_schema().timestamp_key()) {
-        log.insert("@timestamp", ts);
+                if let Some(path) = log.host_path().cloned().as_ref() {
+                    log.rename_key(path, event_path!("os.host"));
+                }
+            }
+        }
+        _ => unreachable!("This sink only accepts logs"),
     }
 
-    if let Some(host) = log.remove(crate::config::log_schema().host_key()) {
-        log.insert("os.host", host);
-    }
-
-    future::ok(event).boxed()
+    events
 }
 
 #[cfg(test)]
 mod tests {
+    use futures::StreamExt;
+    use indoc::indoc;
+
     use super::*;
     use crate::{
         config::SinkConfig,
         sinks::util::test::{build_test_server, load_sink},
-        test_util::{next_addr, random_lines_with_stream},
+        test_util::{
+            components::{self, HTTP_SINK_TAGS},
+            next_addr, random_lines_with_stream,
+        },
     };
-    use futures::StreamExt;
 
     #[test]
     fn generate_config() {
@@ -126,30 +178,26 @@ mod tests {
 
     #[tokio::test]
     async fn smoke() {
-        let (mut config, cx) = load_sink::<SematextLogsConfig>(
-            r#"
-            region = "us"
+        let (mut config, cx) = load_sink::<SematextLogsConfig>(indoc! {r#"
             token = "mylogtoken"
-        "#,
-        )
+        "#})
         .unwrap();
 
         // Make sure we can build the config
-        let _ = config.build(cx.clone()).await.unwrap();
+        _ = config.build(cx.clone()).await.unwrap();
 
         let addr = next_addr();
         // Swap out the host so we can force send it
         // to our local server
-        config.endpoint = Some(format!("http://{}", addr));
-        config.region = None;
+        config.endpoint = Some(format!("http://{addr}"));
 
         let (sink, _) = config.build(cx).await.unwrap();
 
         let (mut rx, _trigger, server) = build_test_server(addr);
         tokio::spawn(server);
 
-        let (expected, events) = random_lines_with_stream(100, 10);
-        sink.run(events).await.unwrap();
+        let (expected, events) = random_lines_with_stream(100, 10, None);
+        components::run_and_assert_sink_compliance(sink, events, &HTTP_SINK_TAGS).await;
 
         let output = rx.next().await.unwrap();
 

@@ -1,86 +1,143 @@
-use crate::expiring_hash_map::ExpiringHashMap;
-use crate::{
-    buffers::Acker,
-    config::{log_schema, DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
-    event::Event,
-    internal_events::FileOpen,
-    sinks::util::{
-        encoding::{EncodingConfig, EncodingConfiguration},
-        StreamSink,
-    },
-    template::Template,
+use std::{
+    convert::TryFrom,
+    time::{Duration, Instant},
 };
-use async_compression::tokio_02::write::GzipEncoder;
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::{
-    future,
-    stream::{BoxStream, StreamExt},
-    FutureExt,
-};
-use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
 
+use async_compression::tokio::write::{GzipEncoder, ZstdEncoder};
+use async_trait::async_trait;
+use bytes::{Bytes, BytesMut};
+use futures::{
+    FutureExt, future,
+    stream::{BoxStream, StreamExt},
+};
+use serde_with::serde_as;
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
 };
-mod bytes_path;
-use bytes_path::BytesPath;
-use std::convert::TryFrom;
+use tokio_util::codec::Encoder as _;
+use typetag;
+use vector_lib::{
+    EstimatedJsonEncodedSizeOf, TimeZone,
+    codecs::{
+        TextSerializerConfig,
+        encoding::{Framer, FramingConfig},
+    },
+    configurable::configurable_component,
+    internal_event::{CountByteSize, EventsSent, InternalEventHandle as _, Output, Registered},
+};
 
-#[derive(Deserialize, Serialize, Debug)]
+use crate::{
+    codecs::{Encoder, EncodingConfigWithFraming, SinkType, Transformer},
+    config::{AcknowledgementsConfig, GenerateConfig, Input, SinkConfig, SinkContext},
+    event::{Event, EventStatus, Finalizable},
+    expiring_hash_map::ExpiringHashMap,
+    internal_events::{
+        FileBytesSent, FileInternalMetricsConfig, FileIoError, FileOpen, TemplateRenderingError,
+    },
+    sinks::util::{StreamSink, timezone_to_offset},
+    template::Template,
+};
+
+mod bytes_path;
+
+use bytes_path::BytesPath;
+
+/// Configuration for the `file` sink.
+#[serde_as]
+#[configurable_component(sink("file", "Output observability events into files."))]
+#[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FileSinkConfig {
+    /// File path to write events to.
+    ///
+    /// Compression format extension must be explicit.
+    #[configurable(metadata(docs::examples = "/tmp/vector-%Y-%m-%d.log"))]
+    #[configurable(metadata(
+        docs::examples = "/tmp/application-{{ application_id }}-%Y-%m-%d.log"
+    ))]
+    #[configurable(metadata(docs::examples = "/tmp/vector-%Y-%m-%d.log.zst"))]
     pub path: Template,
-    pub idle_timeout_secs: Option<u64>,
-    pub encoding: EncodingConfig<Encoding>,
+
+    /// The amount of time that a file can be idle and stay open.
+    ///
+    /// After not receiving any events in this amount of time, the file is flushed and closed.
+    #[serde(default = "default_idle_timeout")]
+    #[serde_as(as = "serde_with::DurationSeconds<u64>")]
+    #[serde(rename = "idle_timeout_secs")]
+    #[configurable(metadata(docs::examples = 600))]
+    #[configurable(metadata(docs::human_name = "Idle Timeout"))]
+    pub idle_timeout: Duration,
+
+    #[serde(flatten)]
+    pub encoding: EncodingConfigWithFraming,
+
+    #[configurable(derived)]
+    #[serde(default, skip_serializing_if = "crate::serde::is_default")]
+    pub compression: Compression,
+
+    #[configurable(derived)]
     #[serde(
         default,
-        skip_serializing_if = "crate::serde::skip_serializing_if_default"
+        deserialize_with = "crate::serde::bool_or_struct",
+        skip_serializing_if = "crate::serde::is_default"
     )]
-    pub compression: Compression,
-}
+    pub acknowledgements: AcknowledgementsConfig,
 
-inventory::submit! {
-    SinkDescription::new::<FileSinkConfig>("file")
+    #[configurable(derived)]
+    #[serde(default)]
+    pub timezone: Option<TimeZone>,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub internal_metrics: FileInternalMetricsConfig,
 }
 
 impl GenerateConfig for FileSinkConfig {
     fn generate_config() -> toml::Value {
         toml::Value::try_from(Self {
             path: Template::try_from("/tmp/vector-%Y-%m-%d.log").unwrap(),
-            idle_timeout_secs: None,
-            encoding: Encoding::Text.into(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
             compression: Default::default(),
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: Default::default(),
         })
         .unwrap()
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum Encoding {
-    Text,
-    Ndjson,
+const fn default_idle_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
-#[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone, Copy)]
+/// Compression configuration.
+// TODO: Why doesn't this already use `crate::sinks::util::Compression`
+// `crate::sinks::util::Compression` doesn't support zstd yet
+#[configurable_component]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Compression {
+    /// [Gzip][gzip] compression.
+    ///
+    /// [gzip]: https://www.gzip.org/
     Gzip,
-    None,
-}
 
-impl Default for Compression {
-    fn default() -> Self {
-        Compression::None
-    }
+    /// [Zstandard][zstd] compression.
+    ///
+    /// [zstd]: https://facebook.github.io/zstd/
+    Zstd,
+
+    /// No compression.
+    #[default]
+    None,
 }
 
 enum OutFile {
     Regular(File),
     Gzip(GzipEncoder<File>),
+    Zstd(ZstdEncoder<File>),
 }
 
 impl OutFile {
@@ -88,6 +145,7 @@ impl OutFile {
         match compression {
             Compression::None => OutFile::Regular(file),
             Compression::Gzip => OutFile::Gzip(GzipEncoder::new(file)),
+            Compression::Zstd => OutFile::Zstd(ZstdEncoder::new(file)),
         }
     }
 
@@ -95,6 +153,7 @@ impl OutFile {
         match self {
             OutFile::Regular(file) => file.sync_all().await,
             OutFile::Gzip(gzip) => gzip.get_mut().sync_all().await,
+            OutFile::Zstd(zstd) => zstd.get_mut().sync_all().await,
         }
     }
 
@@ -102,6 +161,7 @@ impl OutFile {
         match self {
             OutFile::Regular(file) => file.shutdown().await,
             OutFile::Gzip(gzip) => gzip.shutdown().await,
+            OutFile::Zstd(zstd) => zstd.shutdown().await,
         }
     }
 
@@ -109,6 +169,7 @@ impl OutFile {
         match self {
             OutFile::Regular(file) => file.write_all(src).await,
             OutFile::Gzip(gzip) => gzip.write_all(src).await,
+            OutFile::Zstd(zstd) => zstd.write_all(src).await,
         }
     }
 
@@ -127,42 +188,54 @@ impl SinkConfig for FileSinkConfig {
         &self,
         cx: SinkContext,
     ) -> crate::Result<(super::VectorSink, super::Healthcheck)> {
-        let sink = FileSink::new(&self, cx.acker());
+        let sink = FileSink::new(self, cx)?;
         Ok((
-            super::VectorSink::Stream(Box::new(sink)),
+            super::VectorSink::from_event_streamsink(sink),
             future::ok(()).boxed(),
         ))
     }
 
-    fn input_type(&self) -> DataType {
-        DataType::Log
+    fn input(&self) -> Input {
+        Input::new(self.encoding.config().1.input_type())
     }
 
-    fn sink_type(&self) -> &'static str {
-        "file"
+    fn acknowledgements(&self) -> &AcknowledgementsConfig {
+        &self.acknowledgements
     }
 }
 
-#[derive(Debug)]
 pub struct FileSink {
-    acker: Acker,
     path: Template,
-    encoding: EncodingConfig<Encoding>,
+    transformer: Transformer,
+    encoder: Encoder<Framer>,
     idle_timeout: Duration,
     files: ExpiringHashMap<Bytes, OutFile>,
     compression: Compression,
+    events_sent: Registered<EventsSent>,
+    include_file_metric_tag: bool,
 }
 
 impl FileSink {
-    pub fn new(config: &FileSinkConfig, acker: Acker) -> Self {
-        Self {
-            acker,
-            path: config.path.clone(),
-            encoding: config.encoding.clone(),
-            idle_timeout: Duration::from_secs(config.idle_timeout_secs.unwrap_or(30)),
+    pub fn new(config: &FileSinkConfig, cx: SinkContext) -> crate::Result<Self> {
+        let transformer = config.encoding.transformer();
+        let (framer, serializer) = config.encoding.build(SinkType::StreamBased)?;
+        let encoder = Encoder::<Framer>::new(framer, serializer);
+
+        let offset = config
+            .timezone
+            .or(cx.globals.timezone)
+            .and_then(timezone_to_offset);
+
+        Ok(Self {
+            path: config.path.clone().with_tz_offset(offset),
+            transformer,
+            encoder,
+            idle_timeout: config.idle_timeout,
             files: ExpiringHashMap::default(),
             compression: config.compression,
-        }
+            events_sent: register!(EventsSent::from(Output(None))),
+            include_file_metric_tag: config.internal_metrics.include_file_tag,
+        })
     }
 
     /// Uses pass the `event` to `self.path` template to obtain the file path
@@ -170,11 +243,12 @@ impl FileSink {
     fn partition_event(&mut self, event: &Event) -> Option<bytes::Bytes> {
         let bytes = match self.path.render(event) {
             Ok(b) => b,
-            Err(missing_keys) => {
-                warn!(
-                    message = "Keys do not exist on the event; dropping event.",
-                    ?missing_keys
-                );
+            Err(error) => {
+                emit!(TemplateRenderingError {
+                    error,
+                    field: Some("path"),
+                    drop_event: true,
+                });
                 return None;
             }
         };
@@ -193,10 +267,7 @@ impl FileSink {
             tokio::select! {
                 event = input.next() => {
                     match event {
-                        Some(event) => {
-                            self.process_event(event).await;
-                            self.acker.ack(1);
-                        },
+                        Some(event) => self.process_event(event).await,
                         None => {
                             // If we got `None` - terminate the processing.
                             debug!(message = "Receiver exhausted, terminating the processing loop.");
@@ -205,7 +276,13 @@ impl FileSink {
                             debug!(message = "Closing all the open files.");
                             for (path, file) in self.files.iter_mut() {
                                 if let Err(error) = file.close().await {
-                                    error!(message = "Failed to close file.", path = ?path, %error);
+                                    emit!(FileIoError {
+                                        error,
+                                        code: "failed_closing_file",
+                                        message: "Failed to close file.",
+                                        path,
+                                        dropped_events: 0,
+                                    });
                                 } else{
                                     trace!(message = "Successfully closed file.", path = ?path);
                                 }
@@ -224,21 +301,23 @@ impl FileSink {
                         // We do not poll map when it's empty, so we should
                         // never reach this branch.
                         None => unreachable!(),
-                        Some(Ok((mut expired_file, path))) => {
+                        Some((mut expired_file, path)) => {
                             // We got an expired file. All we really want is to
                             // flush and close it.
                             if let Err(error) = expired_file.close().await {
-                                error!(message = "Failed to close file.", path = ?path, %error);
+                                emit!(FileIoError {
+                                    error,
+                                    code: "failed_closing_file",
+                                    message: "Failed to close file.",
+                                    path: &path,
+                                    dropped_events: 0,
+                                });
                             }
                             drop(expired_file); // ignore close error
                             emit!(FileOpen {
                                 count: self.files.len()
                             });
                         }
-                        Some(Err(error)) => error!(
-                            message = "An error occurred while expiring a file.",
-                            %error,
-                        ),
                     }
                 }
             }
@@ -247,14 +326,15 @@ impl FileSink {
         Ok(())
     }
 
-    async fn process_event(&mut self, event: Event) {
+    async fn process_event(&mut self, mut event: Event) {
         let path = match self.partition_event(&event) {
             Some(path) => path,
             None => {
                 // We weren't able to find the path to use for the
                 // file.
-                // This is already logged at `partition_event`, so
+                // The error is already handled at `partition_event`, so
                 // here we just skip the event.
+                event.metadata().update_status(EventStatus::Errored);
                 return;
             }
         };
@@ -273,7 +353,14 @@ impl FileSink {
                     // We couldn't open the file for this event.
                     // Maybe other events will work though! Just log
                     // the error and skip this event.
-                    error!(message = "Unable to open the file.", path = ?path, %error);
+                    emit!(FileIoError {
+                        code: "failed_opening_file",
+                        message: "Unable to open the file.",
+                        error,
+                        path: &path,
+                        dropped_events: 1,
+                    });
+                    event.metadata().update_status(EventStatus::Errored);
                     return;
                 }
             };
@@ -288,8 +375,28 @@ impl FileSink {
         };
 
         trace!(message = "Writing an event to file.", path = ?path);
-        if let Err(error) = write_event_to_file(file, event, &self.encoding).await {
-            error!(message = "Failed to write file.", path = ?path, %error);
+        let event_size = event.estimated_json_encoded_size_of();
+        let finalizers = event.take_finalizers();
+        match write_event_to_file(file, event, &self.transformer, &mut self.encoder).await {
+            Ok(byte_size) => {
+                finalizers.update_status(EventStatus::Delivered);
+                self.events_sent.emit(CountByteSize(1, event_size));
+                emit!(FileBytesSent {
+                    byte_size,
+                    file: String::from_utf8_lossy(&path),
+                    include_file_metric_tag: self.include_file_metric_tag,
+                });
+            }
+            Err(error) => {
+                finalizers.update_status(EventStatus::Errored);
+                emit!(FileIoError {
+                    code: "failed_writing_file",
+                    message: "Failed to write the file.",
+                    error,
+                    path: &path,
+                    dropped_events: 1,
+                });
+            }
         }
     }
 }
@@ -310,45 +417,53 @@ async fn open_file(path: impl AsRef<std::path::Path>) -> std::io::Result<File> {
         .await
 }
 
-pub fn encode_event(encoding: &EncodingConfig<Encoding>, mut event: Event) -> Vec<u8> {
-    encoding.apply_rules(&mut event);
-    let log = event.into_log();
-    match encoding.codec() {
-        Encoding::Ndjson => serde_json::to_vec(&log).expect("Unable to encode event as JSON."),
-        Encoding::Text => log
-            .get(log_schema().message_key())
-            .map(|v| v.to_string_lossy().into_bytes())
-            .unwrap_or_default(),
-    }
-}
-
 async fn write_event_to_file(
     file: &mut OutFile,
-    event: Event,
-    encoding: &EncodingConfig<Encoding>,
-) -> Result<(), std::io::Error> {
-    let mut buf = encode_event(encoding, event);
-    buf.push(b'\n');
-    file.write_all(&buf[..]).await
+    mut event: Event,
+    transformer: &Transformer,
+    encoder: &mut Encoder<Framer>,
+) -> Result<usize, std::io::Error> {
+    transformer.transform(&mut event);
+    let mut buffer = BytesMut::new();
+    encoder
+        .encode(event, &mut buffer)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    file.write_all(&buffer).await.map(|()| buffer.len())
 }
 
 #[async_trait]
-impl StreamSink for FileSink {
-    async fn run(&mut self, input: BoxStream<'_, Event>) -> Result<(), ()> {
-        FileSink::run(self, input).await.expect("file sink error");
+impl StreamSink<Event> for FileSink {
+    async fn run(mut self: Box<Self>, input: BoxStream<'_, Event>) -> Result<(), ()> {
+        FileSink::run(&mut self, input)
+            .await
+            .expect("file sink error");
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_util::{
-        lines_from_file, lines_from_gzip_file, random_events_with_stream, random_lines_with_stream,
-        temp_dir, temp_file, trace_init,
-    };
-    use futures::stream;
     use std::convert::TryInto;
+
+    use chrono::{SubsecRound, Utc};
+    use futures::{SinkExt, stream};
+    use similar_asserts::assert_eq;
+    use vector_lib::{
+        codecs::JsonSerializerConfig,
+        event::{LogEvent, TraceEvent},
+        sink::VectorSink,
+    };
+
+    use super::*;
+    use crate::{
+        config::log_schema,
+        test_util::{
+            components::{FILE_SINK_TAGS, assert_sink_compliance},
+            lines_from_file, lines_from_gzip_file, lines_from_zstd_file, random_events_with_stream,
+            random_lines_with_stream, random_metrics_with_stream,
+            random_metrics_with_stream_timestamp, temp_dir, temp_file, trace_init,
+        },
+    };
 
     #[test]
     fn generate_config() {
@@ -356,23 +471,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_partition() {
-        trace_init();
-
+    async fn log_single_partition() {
         let template = temp_file();
 
         let config = FileSinkConfig {
             path: template.clone().try_into().unwrap(),
-            idle_timeout_secs: None,
-            encoding: Encoding::Text.into(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
             compression: Compression::None,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
         };
 
-        let mut sink = FileSink::new(&config, Acker::Null);
-        let (input, _events) = random_lines_with_stream(100, 64);
+        let (input, _events) = random_lines_with_stream(100, 64, None);
 
-        let events = Box::pin(stream::iter(input.clone().into_iter().map(Event::from)));
-        sink.run(events).await.unwrap();
+        run_assert_log_sink(&config, input.clone()).await;
 
         let output = lines_from_file(template);
         for (input, output) in input.into_iter().zip(output) {
@@ -381,23 +497,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_partition_gzip() {
-        trace_init();
-
+    async fn log_single_partition_gzip() {
         let template = temp_file();
 
         let config = FileSinkConfig {
             path: template.clone().try_into().unwrap(),
-            idle_timeout_secs: None,
-            encoding: Encoding::Text.into(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
             compression: Compression::Gzip,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
         };
 
-        let mut sink = FileSink::new(&config, Acker::Null);
-        let (input, _) = random_lines_with_stream(100, 64);
+        let (input, _) = random_lines_with_stream(100, 64, None);
 
-        let events = Box::pin(stream::iter(input.clone().into_iter().map(Event::from)));
-        sink.run(events).await.unwrap();
+        run_assert_log_sink(&config, input.clone()).await;
 
         let output = lines_from_gzip_file(template);
         for (input, output) in input.into_iter().zip(output) {
@@ -406,9 +523,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn many_partitions() {
-        trace_init();
+    async fn log_single_partition_zstd() {
+        let template = temp_file();
 
+        let config = FileSinkConfig {
+            path: template.clone().try_into().unwrap(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
+            compression: Compression::Zstd,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
+        };
+
+        let (input, _) = random_lines_with_stream(100, 64, None);
+
+        run_assert_log_sink(&config, input.clone()).await;
+
+        let output = lines_from_zstd_file(template);
+        for (input, output) in input.into_iter().zip(output) {
+            assert_eq!(input, output);
+        }
+    }
+
+    #[tokio::test]
+    async fn log_many_partitions() {
         let directory = temp_dir();
 
         let mut template = directory.to_string_lossy().to_string();
@@ -418,14 +559,17 @@ mod tests {
 
         let config = FileSinkConfig {
             path: template.try_into().unwrap(),
-            idle_timeout_secs: None,
-            encoding: Encoding::Text.into(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
             compression: Compression::None,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
         };
 
-        let mut sink = FileSink::new(&config, Acker::Null);
-
-        let (mut input, _events) = random_events_with_stream(32, 8);
+        let (mut input, _events) = random_events_with_stream(32, 8, None);
         input[0].as_mut_log().insert("date", "2019-26-07");
         input[0].as_mut_log().insert("level", "warning");
         input[1].as_mut_log().insert("date", "2019-26-07");
@@ -443,92 +587,246 @@ mod tests {
         input[7].as_mut_log().insert("date", "2019-29-07");
         input[7].as_mut_log().insert("level", "error");
 
-        let events = Box::pin(stream::iter(input.clone().into_iter()));
-        sink.run(events).await.unwrap();
+        run_assert_sink(&config, input.clone().into_iter()).await;
 
-        let output = vec![
-            lines_from_file(&directory.join("warnings-2019-26-07.log")),
-            lines_from_file(&directory.join("errors-2019-26-07.log")),
-            lines_from_file(&directory.join("warnings-2019-27-07.log")),
-            lines_from_file(&directory.join("errors-2019-27-07.log")),
-            lines_from_file(&directory.join("warnings-2019-28-07.log")),
-            lines_from_file(&directory.join("errors-2019-29-07.log")),
+        let output = [
+            lines_from_file(directory.join("warnings-2019-26-07.log")),
+            lines_from_file(directory.join("errors-2019-26-07.log")),
+            lines_from_file(directory.join("warnings-2019-27-07.log")),
+            lines_from_file(directory.join("errors-2019-27-07.log")),
+            lines_from_file(directory.join("warnings-2019-28-07.log")),
+            lines_from_file(directory.join("errors-2019-29-07.log")),
         ];
 
+        let message_key = log_schema().message_key().unwrap().to_string();
         assert_eq!(
-            input[0].as_log()[log_schema().message_key()],
+            input[0].as_log()[&message_key],
             From::<&str>::from(&output[0][0])
         );
         assert_eq!(
-            input[1].as_log()[log_schema().message_key()],
+            input[1].as_log()[&message_key],
             From::<&str>::from(&output[1][0])
         );
         assert_eq!(
-            input[2].as_log()[log_schema().message_key()],
+            input[2].as_log()[&message_key],
             From::<&str>::from(&output[0][1])
         );
         assert_eq!(
-            input[3].as_log()[log_schema().message_key()],
+            input[3].as_log()[&message_key],
             From::<&str>::from(&output[3][0])
         );
         assert_eq!(
-            input[4].as_log()[log_schema().message_key()],
+            input[4].as_log()[&message_key],
             From::<&str>::from(&output[2][0])
         );
         assert_eq!(
-            input[5].as_log()[log_schema().message_key()],
+            input[5].as_log()[&message_key],
             From::<&str>::from(&output[2][1])
         );
         assert_eq!(
-            input[6].as_log()[log_schema().message_key()],
+            input[6].as_log()[&message_key],
             From::<&str>::from(&output[4][0])
         );
         assert_eq!(
-            input[7].as_log()[log_schema().message_key()],
+            input[7].as_log()[message_key],
             From::<&str>::from(&output[5][0])
         );
     }
 
     #[tokio::test]
-    async fn reopening() {
-        use pretty_assertions::assert_eq;
-
+    async fn log_reopening() {
         trace_init();
 
         let template = temp_file();
 
         let config = FileSinkConfig {
             path: template.clone().try_into().unwrap(),
-            idle_timeout_secs: Some(1),
-            encoding: Encoding::Text.into(),
+            idle_timeout: Duration::from_secs(1),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
             compression: Compression::None,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
         };
 
-        let mut sink = FileSink::new(&config, Acker::Null);
-        let (mut input, _events) = random_lines_with_stream(10, 64);
+        let (mut input, _events) = random_lines_with_stream(10, 64, None);
 
-        let (mut tx, rx) = tokio::sync::mpsc::channel(1);
+        let (mut tx, rx) = futures::channel::mpsc::channel(0);
 
-        let _ = tokio::spawn(async move { sink.run(Box::pin(rx)).await });
+        let sink_handle = tokio::spawn(async move {
+            assert_sink_compliance(&FILE_SINK_TAGS, async move {
+                let sink = FileSink::new(&config, SinkContext::default()).unwrap();
+                VectorSink::from_event_streamsink(sink)
+                    .run(Box::pin(rx.map(Into::into)))
+                    .await
+                    .expect("Running sink failed");
+            })
+            .await
+        });
 
         // send initial payload
         for line in input.clone() {
-            tx.send(Event::from(line)).await.unwrap();
+            tx.send(Event::Log(LogEvent::from(line))).await.unwrap();
         }
 
         // wait for file to go idle and be closed
-        tokio::time::delay_for(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         // trigger another write
         let last_line = "i should go at the end";
-        tx.send(Event::from(last_line)).await.unwrap();
+        tx.send(LogEvent::from(last_line).into()).await.unwrap();
         input.push(String::from(last_line));
 
         // wait for another flush
-        tokio::time::delay_for(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // make sure we appended instead of overwriting
         let output = lines_from_file(template);
         assert_eq!(input, output);
+
+        // make sure sink stops and that it did not panic
+        drop(tx);
+        sink_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metric_single_partition() {
+        let template = temp_file();
+
+        let config = FileSinkConfig {
+            path: template.clone().try_into().unwrap(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
+            compression: Compression::None,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
+        };
+
+        let (input, _events) = random_metrics_with_stream(100, None, None);
+
+        run_assert_sink(&config, input.clone().into_iter()).await;
+
+        let output = lines_from_file(template);
+        for (input, output) in input.into_iter().zip(output) {
+            let metric_name = input.as_metric().name();
+            assert!(output.contains(metric_name));
+        }
+    }
+
+    #[tokio::test]
+    async fn metric_many_partitions() {
+        let directory = temp_dir();
+
+        let format = "%Y-%m-%d-%H-%M-%S";
+        let mut template = directory.to_string_lossy().to_string();
+        template.push_str(&format!("/{format}.log"));
+
+        let config = FileSinkConfig {
+            path: template.try_into().unwrap(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
+            compression: Compression::None,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
+        };
+
+        let metric_count = 3;
+        let timestamp = Utc::now().trunc_subsecs(3);
+        let timestamp_offset = Duration::from_secs(1);
+
+        let (input, _events) = random_metrics_with_stream_timestamp(
+            metric_count,
+            None,
+            None,
+            timestamp,
+            timestamp_offset,
+        );
+
+        run_assert_sink(&config, input.clone().into_iter()).await;
+
+        let output = (0..metric_count).map(|index| {
+            let expected_timestamp = timestamp + (timestamp_offset * index as u32);
+            let expected_filename =
+                directory.join(format!("{}.log", expected_timestamp.format(format)));
+
+            lines_from_file(expected_filename)
+        });
+        for (input, output) in input.iter().zip(output) {
+            // The format will partition by second and metrics are a second apart.
+            assert_eq!(
+                output.len(),
+                1,
+                "Expected the output file to contain one metric"
+            );
+            let output = &output[0];
+
+            let metric_name = input.as_metric().name();
+            assert!(output.contains(metric_name));
+        }
+    }
+
+    #[tokio::test]
+    async fn trace_single_partition() {
+        let template = temp_file();
+
+        let config = FileSinkConfig {
+            path: template.clone().try_into().unwrap(),
+            idle_timeout: default_idle_timeout(),
+            encoding: (None::<FramingConfig>, JsonSerializerConfig::default()).into(),
+            compression: Compression::None,
+            acknowledgements: Default::default(),
+            timezone: Default::default(),
+            internal_metrics: FileInternalMetricsConfig {
+                include_file_tag: true,
+            },
+        };
+
+        let (input, _events) = random_lines_with_stream(100, 64, None);
+
+        run_assert_trace_sink(&config, input.clone()).await;
+
+        let output = lines_from_file(template);
+        for (input, output) in input.iter().zip(output) {
+            assert!(output.contains(input));
+        }
+    }
+
+    async fn run_assert_log_sink(config: &FileSinkConfig, events: Vec<String>) {
+        run_assert_sink(
+            config,
+            events.into_iter().map(LogEvent::from).map(Event::Log),
+        )
+        .await;
+    }
+
+    async fn run_assert_trace_sink(config: &FileSinkConfig, events: Vec<String>) {
+        run_assert_sink(
+            config,
+            events
+                .into_iter()
+                .map(LogEvent::from)
+                .map(TraceEvent::from)
+                .map(Event::Trace),
+        )
+        .await;
+    }
+
+    async fn run_assert_sink(config: &FileSinkConfig, events: impl Iterator<Item = Event> + Send) {
+        assert_sink_compliance(&FILE_SINK_TAGS, async move {
+            let sink = FileSink::new(config, SinkContext::default()).unwrap();
+            VectorSink::from_event_streamsink(sink)
+                .run(Box::pin(stream::iter(events.map(Into::into))))
+                .await
+                .expect("Running sink failed")
+        })
+        .await;
     }
 }

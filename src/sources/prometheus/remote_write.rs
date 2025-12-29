@@ -1,41 +1,79 @@
-use crate::{
-    config::{self, GenerateConfig, GlobalOptions, SourceConfig, SourceDescription},
-    event::{Metric, MetricKind, MetricValue},
-    internal_events::{
-        PrometheusNoNameError, PrometheusRemoteWriteParseError, PrometheusRemoteWriteReceived,
-    },
-    prometheus::{proto, METRIC_NAME_LABEL},
-    shutdown::ShutdownSignal,
-    sources::{
-        self,
-        util::{decode, ErrorMessage, HttpSource, HttpSourceAuthConfig},
-    },
-    tls::TlsConfig,
-    Event, Pipeline,
-};
+use std::{collections::HashMap, net::SocketAddr};
+
 use bytes::Bytes;
-use chrono::{DateTime, TimeZone, Utc};
 use prost::Message;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashMap},
-    net::SocketAddr,
+use vector_lib::{
+    config::LogNamespace, configurable::configurable_component, prometheus::parser::proto,
 };
 use warp::http::{HeaderMap, StatusCode};
 
-const SOURCE_NAME: &str = "prometheus_remote_write";
+use super::parser;
+use crate::{
+    common::http::{ErrorMessage, server_auth::HttpServerAuthConfig},
+    config::{
+        GenerateConfig, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
+    },
+    event::Event,
+    http::KeepaliveConfig,
+    internal_events::PrometheusRemoteWriteParseError,
+    serde::bool_or_struct,
+    sources::{
+        self,
+        util::{HttpSource, decode, http::HttpMethod},
+    },
+    tls::TlsEnableableConfig,
+};
+use typetag;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct PrometheusRemoteWriteConfig {
+/// Configuration for the `prometheus_remote_write` source.
+#[configurable_component(source(
+    "prometheus_remote_write",
+    "Receive metric via the Prometheus Remote Write protocol."
+))]
+#[derive(Clone, Debug)]
+pub struct PrometheusRemoteWriteConfig {
+    /// The socket address to accept connections on.
+    ///
+    /// The address _must_ include a port.
+    #[configurable(metadata(docs::examples = "0.0.0.0:9090"))]
     address: SocketAddr,
 
-    tls: Option<TlsConfig>,
+    #[configurable(derived)]
+    tls: Option<TlsEnableableConfig>,
 
-    auth: Option<HttpSourceAuthConfig>,
+    #[configurable(derived)]
+    #[configurable(metadata(docs::advanced))]
+    auth: Option<HttpServerAuthConfig>,
+
+    #[configurable(derived)]
+    #[serde(default, deserialize_with = "bool_or_struct")]
+    acknowledgements: SourceAcknowledgementsConfig,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    keepalive: KeepaliveConfig,
+
+    /// Whether to skip/discard received samples with NaN values.
+    ///
+    /// When enabled, any metric sample with a NaN value will be filtered out
+    /// during parsing, preventing downstream processing of invalid metrics.
+    #[configurable(metadata(docs::advanced))]
+    #[serde(default)]
+    skip_nan_values: bool,
 }
 
-inventory::submit! {
-    SourceDescription::new::<PrometheusRemoteWriteConfig>(SOURCE_NAME)
+impl PrometheusRemoteWriteConfig {
+    #[cfg(test)]
+    pub fn from_address(address: SocketAddr) -> Self {
+        Self {
+            address,
+            tls: None,
+            auth: None,
+            acknowledgements: false.into(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: false,
+        }
+    }
 }
 
 impl GenerateConfig for PrometheusRemoteWriteConfig {
@@ -44,6 +82,9 @@ impl GenerateConfig for PrometheusRemoteWriteConfig {
             address: "127.0.0.1:9090".parse().unwrap(),
             tls: None,
             auth: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: false,
         })
         .unwrap()
     }
@@ -52,132 +93,95 @@ impl GenerateConfig for PrometheusRemoteWriteConfig {
 #[async_trait::async_trait]
 #[typetag::serde(name = "prometheus_remote_write")]
 impl SourceConfig for PrometheusRemoteWriteConfig {
-    async fn build(
-        &self,
-        _name: &str,
-        _globals: &GlobalOptions,
-        shutdown: ShutdownSignal,
-        out: Pipeline,
-    ) -> crate::Result<sources::Source> {
-        let source = RemoteWriteSource;
-        source.run(self.address, "", &self.tls, &self.auth, out, shutdown)
+    async fn build(&self, cx: SourceContext) -> crate::Result<sources::Source> {
+        let source = RemoteWriteSource {
+            skip_nan_values: self.skip_nan_values,
+        };
+        source.run(
+            self.address,
+            "",
+            HttpMethod::Post,
+            StatusCode::OK,
+            true,
+            self.tls.as_ref(),
+            self.auth.as_ref(),
+            cx,
+            self.acknowledgements,
+            self.keepalive.clone(),
+        )
     }
 
-    fn output_type(&self) -> crate::config::DataType {
-        config::DataType::Metric
+    fn outputs(&self, _global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
+        vec![SourceOutput::new_metrics()]
     }
 
-    fn source_type(&self) -> &'static str {
-        SOURCE_NAME
+    fn can_acknowledge(&self) -> bool {
+        true
     }
 }
 
 #[derive(Clone)]
-struct RemoteWriteSource;
+struct RemoteWriteSource {
+    skip_nan_values: bool,
+}
+
+impl RemoteWriteSource {
+    fn decode_body(&self, body: Bytes) -> Result<Vec<Event>, ErrorMessage> {
+        let request = proto::WriteRequest::decode(body).map_err(|error| {
+            emit!(PrometheusRemoteWriteParseError {
+                error: error.clone()
+            });
+            ErrorMessage::new(
+                StatusCode::BAD_REQUEST,
+                format!("Could not decode write request: {error}"),
+            )
+        })?;
+        parser::parse_request(request, self.skip_nan_values).map_err(|error| {
+            ErrorMessage::new(
+                StatusCode::BAD_REQUEST,
+                format!("Could not decode write request: {error}"),
+            )
+        })
+    }
+}
 
 impl HttpSource for RemoteWriteSource {
-    fn build_event(
+    fn decode(&self, encoding_header: Option<&str>, body: Bytes) -> Result<Bytes, ErrorMessage> {
+        // Default to snappy decoding the request body.
+        decode(encoding_header.or(Some("snappy")), body)
+    }
+
+    fn build_events(
         &self,
-        mut body: Bytes,
-        header_map: HeaderMap,
-        _query_parameters: HashMap<String, String>,
+        body: Bytes,
+        _header_map: &HeaderMap,
+        _query_parameters: &HashMap<String, String>,
+        _full_path: &str,
     ) -> Result<Vec<Event>, ErrorMessage> {
-        // If `Content-Encoding` header isn't `snappy` HttpSource won't decode it for us
-        // se we need to.
-        if header_map
-            .get("Content-Encoding")
-            .map(|header| header.as_ref())
-            != Some(b"snappy")
-        {
-            body = decode(&Some("snappy".to_string()), body)?;
-        }
-        let result = decode_body(body)?;
-        let count = result.len();
-        emit!(PrometheusRemoteWriteReceived { count });
-        Ok(result)
+        let events = self.decode_body(body)?;
+        Ok(events)
     }
-}
-
-fn decode_body(body: Bytes) -> Result<Vec<Event>, ErrorMessage> {
-    let request = proto::WriteRequest::decode(body).map_err(|error| {
-        emit!(PrometheusRemoteWriteParseError {
-            error: error.clone()
-        });
-        ErrorMessage::new(
-            StatusCode::BAD_REQUEST,
-            format!("Could not decode write request: {}", error),
-        )
-    })?;
-    Ok(decode_request(request))
-}
-
-fn decode_request(request: proto::WriteRequest) -> Vec<Event> {
-    request
-        .timeseries
-        .into_iter()
-        .filter_map(decode_timeseries)
-        .flatten()
-        .collect()
-}
-
-fn decode_timeseries(timeseries: proto::TimeSeries) -> Option<impl Iterator<Item = Event>> {
-    let (name, tags) = parse_labels(timeseries.labels);
-    match name {
-        Some(name) => Some(timeseries.samples.into_iter().map(move |sample| {
-            let value = sample.value;
-            let value = if name.ends_with("_total") {
-                MetricValue::Counter { value }
-            } else {
-                MetricValue::Gauge { value }
-            };
-            Metric {
-                name: name.clone(),
-                namespace: None,
-                timestamp: parse_timestamp(sample.timestamp),
-                tags: tags.clone(),
-                kind: MetricKind::Absolute,
-                value,
-            }
-            .into()
-        })),
-        None => {
-            emit!(PrometheusNoNameError);
-            None
-        }
-    }
-}
-
-fn parse_labels(labels: Vec<proto::Label>) -> (Option<String>, Option<BTreeMap<String, String>>) {
-    let mut tags = labels
-        .into_iter()
-        .map(|label| (label.name, label.value))
-        .collect::<BTreeMap<String, String>>();
-    let name = tags.remove(METRIC_NAME_LABEL);
-    let tags = if tags.is_empty() { None } else { Some(tags) };
-    (name, tags)
-}
-
-fn parse_timestamp(timestamp: i64) -> Option<DateTime<Utc>> {
-    // Conversion into UTC should never produce an ambiguous time, but
-    // we still need to pick one so arbitrarily choose the latest.
-    Utc.timestamp_opt(timestamp / 1000, (timestamp % 1000) as u32 * 1000000)
-        .latest()
 }
 
 #[cfg(test)]
 mod test {
+    use chrono::{SubsecRound as _, Utc};
+    use vector_lib::{
+        event::{EventStatus, Metric, MetricKind, MetricValue},
+        metric_tags,
+    };
+
     use super::*;
     use crate::{
+        SourceSender,
         config::{SinkConfig, SinkContext},
-        event::{MetricKind, MetricValue},
         sinks::prometheus::remote_write::RemoteWriteConfig,
-        test_util, Pipeline,
+        test_util::{self, wait_for_tcp},
+        tls::MaybeTlsSettings,
     };
-    use chrono::{SubsecRound as _, Utc};
-    use futures::stream;
 
     #[test]
-    fn genreate_config() {
+    fn generate_config() {
         crate::test_util::test_generate_config::<PrometheusRemoteWriteConfig>();
     }
 
@@ -188,29 +192,30 @@ mod test {
 
     #[tokio::test]
     async fn receives_metrics_over_https() {
-        receives_metrics(Some(TlsConfig::test_config())).await;
+        receives_metrics(Some(TlsEnableableConfig::test_config())).await;
     }
 
-    async fn receives_metrics(tls: Option<TlsConfig>) {
+    async fn receives_metrics(tls: Option<TlsEnableableConfig>) {
         let address = test_util::next_addr();
-        let (tx, rx) = Pipeline::new_test();
+        let (tx, rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
 
-        let proto = if tls.is_none() { "http" } else { "https" };
+        let proto = MaybeTlsSettings::from_config(tls.as_ref(), true)
+            .unwrap()
+            .http_protocol_name();
         let source = PrometheusRemoteWriteConfig {
             address,
             auth: None,
             tls: tls.clone(),
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: false,
         };
         let source = source
-            .build(
-                "source",
-                &GlobalOptions::default(),
-                ShutdownSignal::noop(),
-                tx,
-            )
+            .build(SourceContext::new_test(tx, None))
             .await
             .unwrap();
         tokio::spawn(source);
+        wait_for_tcp(address).await;
 
         let sink = RemoteWriteConfig {
             endpoint: format!("{}://localhost:{}/", proto, address.port()),
@@ -218,70 +223,362 @@ mod test {
             ..Default::default()
         };
         let (sink, _) = sink
-            .build(SinkContext::new_test())
+            .build(SinkContext::default())
             .await
             .expect("Error building config.");
 
         let events = make_events();
-        sink.run(stream::iter(events.clone())).await.unwrap();
+        let events_copy = events.clone();
+        let mut output = test_util::spawn_collect_ready(
+            async move {
+                sink.run_events(events_copy).await.unwrap();
+            },
+            rx,
+            1,
+        )
+        .await;
 
-        let mut output = test_util::collect_ready(rx).await;
         // The MetricBuffer used by the sink may reorder the metrics, so
         // put them back into order before comparing.
-        output.sort_unstable_by_key(|event| event.as_metric().name.clone());
+        output.sort_unstable_by_key(|event| event.as_metric().name().to_owned());
 
-        assert_eq!(events, output);
+        vector_lib::assert_event_data_eq!(events, output);
     }
 
     fn make_events() -> Vec<Event> {
-        (0..10)
-            .map(|num| {
-                let timestamp = Utc::now().trunc_subsecs(3);
-                Event::Metric(Metric {
-                    name: format!("gauge_{}", num),
-                    namespace: None,
-                    timestamp: Some(timestamp),
-                    tags: None,
-                    kind: MetricKind::Absolute,
-                    value: MetricValue::Gauge { value: num as f64 },
-                })
-            })
-            .collect()
+        let timestamp = || Utc::now().trunc_subsecs(3);
+        vec![
+            Metric::new(
+                "counter_1",
+                MetricKind::Absolute,
+                MetricValue::Counter { value: 42.0 },
+            )
+            .with_timestamp(Some(timestamp()))
+            .into(),
+            Metric::new(
+                "gauge_2",
+                MetricKind::Absolute,
+                MetricValue::Gauge { value: 41.0 },
+            )
+            .with_timestamp(Some(timestamp()))
+            .into(),
+            Metric::new(
+                "histogram_3",
+                MetricKind::Absolute,
+                MetricValue::AggregatedHistogram {
+                    buckets: vector_lib::buckets![ 2.3 => 11, 4.2 => 85 ],
+                    count: 96,
+                    sum: 156.2,
+                },
+            )
+            .with_timestamp(Some(timestamp()))
+            .into(),
+            Metric::new(
+                "summary_4",
+                MetricKind::Absolute,
+                MetricValue::AggregatedSummary {
+                    quantiles: vector_lib::quantiles![ 0.1 => 1.2, 0.5 => 3.6, 0.9 => 5.2 ],
+                    count: 23,
+                    sum: 8.6,
+                },
+            )
+            .with_timestamp(Some(timestamp()))
+            .into(),
+        ]
+    }
+
+    async fn send_request_and_assert(port: u16, request_body: Vec<u8>) {
+        // Send the request via HTTP POST
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://localhost:{}/", port))
+            .header("Content-Type", "application/x-protobuf")
+            .header("Content-Encoding", "snappy")
+            .body(request_body)
+            .send()
+            .await
+            .unwrap();
+
+        // Should succeed (not return 400) despite conflicting metadata
+        assert!(
+            response.status().is_success(),
+            "Expected success but got: {}",
+            response.status()
+        );
+    }
+
+    /// According to the [spec](https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md?plain=1#L115)
+    /// > Label names MUST be unique within a LabelSet.
+    /// Prometheus itself will reject the metric with an error. Largely to remain backward compatible with older versions of Vector,
+    /// we accept the metric, but take the last label in the list.
+    #[tokio::test]
+    async fn receives_metrics_duplicate_labels() {
+        let address = test_util::next_addr();
+        let (tx, rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+
+        let source = PrometheusRemoteWriteConfig {
+            address,
+            auth: None,
+            tls: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: false,
+        };
+        let source = source
+            .build(SourceContext::new_test(tx, None))
+            .await
+            .unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+
+        let sink = RemoteWriteConfig {
+            endpoint: format!("http://localhost:{}/", address.port()),
+            ..Default::default()
+        };
+        let (sink, _) = sink
+            .build(SinkContext::default())
+            .await
+            .expect("Error building config.");
+
+        let timestamp = Utc::now().trunc_subsecs(3);
+
+        let events = vec![
+            Metric::new(
+                "gauge_2",
+                MetricKind::Absolute,
+                MetricValue::Gauge { value: 41.0 },
+            )
+            .with_timestamp(Some(timestamp))
+            .with_tags(Some(metric_tags! {
+                "code" => "200".to_string(),
+                "code" => "success".to_string(),
+            }))
+            .into(),
+        ];
+
+        let expected = vec![
+            Metric::new(
+                "gauge_2",
+                MetricKind::Absolute,
+                MetricValue::Gauge { value: 41.0 },
+            )
+            .with_timestamp(Some(timestamp))
+            .with_tags(Some(metric_tags! {
+                "code" => "success".to_string(),
+            }))
+            .into(),
+        ];
+
+        let output = test_util::spawn_collect_ready(
+            async move {
+                sink.run_events(events).await.unwrap();
+            },
+            rx,
+            1,
+        )
+        .await;
+
+        vector_lib::assert_event_data_eq!(expected, output);
+    }
+
+    #[tokio::test]
+    async fn test_skip_nan_values_enabled() {
+        let address = test_util::next_addr();
+        let (tx, rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+
+        let source = PrometheusRemoteWriteConfig {
+            address,
+            auth: None,
+            tls: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: true,
+        };
+        let source = source
+            .build(SourceContext::new_test(tx, None))
+            .await
+            .unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+
+        // Create a request with NaN values
+        let request_body = {
+            use prost::Message;
+            use vector_lib::prometheus::parser::proto;
+
+            let request = proto::WriteRequest {
+                metadata: vec![],
+                timeseries: vec![
+                    proto::TimeSeries {
+                        labels: vec![proto::Label {
+                            name: "__name__".into(),
+                            value: "test_metric_valid".into(),
+                        }],
+                        samples: vec![proto::Sample {
+                            value: 42.0,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        }],
+                    },
+                    proto::TimeSeries {
+                        labels: vec![proto::Label {
+                            name: "__name__".into(),
+                            value: "test_metric_nan".into(),
+                        }],
+                        samples: vec![proto::Sample {
+                            value: f64::NAN,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        }],
+                    },
+                ],
+            };
+
+            let mut buf = Vec::new();
+            request.encode(&mut buf).unwrap();
+
+            // Compress with snappy as expected by the remote_write endpoint
+            snap::raw::Encoder::new().compress_vec(&buf).unwrap()
+        };
+
+        send_request_and_assert(address.port(), request_body).await;
+
+        // Verify we only received the valid metric (NaN metric should be filtered)
+        let output = test_util::collect_ready(rx).await;
+        assert_eq!(output.len(), 1);
+
+        let metric = output[0].as_metric();
+        assert_eq!(metric.name(), "test_metric_valid");
+        assert_eq!(metric.value(), &MetricValue::Gauge { value: 42.0 });
+    }
+
+    #[tokio::test]
+    async fn test_skip_nan_values_disabled() {
+        let address = test_util::next_addr();
+        let (tx, rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+
+        let source = PrometheusRemoteWriteConfig {
+            address,
+            auth: None,
+            tls: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: false,
+        };
+        let source = source
+            .build(SourceContext::new_test(tx, None))
+            .await
+            .unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+
+        // Create a request with NaN values
+        let request_body = {
+            use prost::Message;
+            use vector_lib::prometheus::parser::proto;
+
+            let request = proto::WriteRequest {
+                metadata: vec![],
+                timeseries: vec![
+                    proto::TimeSeries {
+                        labels: vec![proto::Label {
+                            name: "__name__".into(),
+                            value: "test_metric_valid".into(),
+                        }],
+                        samples: vec![proto::Sample {
+                            value: 42.0,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        }],
+                    },
+                    proto::TimeSeries {
+                        labels: vec![proto::Label {
+                            name: "__name__".into(),
+                            value: "test_metric_nan".into(),
+                        }],
+                        samples: vec![proto::Sample {
+                            value: f64::NAN,
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                        }],
+                    },
+                ],
+            };
+
+            let mut buf = Vec::new();
+            request.encode(&mut buf).unwrap();
+
+            // Compress with snappy as expected by the remote_write endpoint
+            snap::raw::Encoder::new().compress_vec(&buf).unwrap()
+        };
+
+        send_request_and_assert(address.port(), request_body).await;
+
+        // Verify we received both metrics (including NaN metric)
+        let mut output = test_util::collect_ready(rx).await;
+        assert_eq!(output.len(), 2);
+
+        // Sort by name for predictable testing
+        output.sort_by(|a, b| a.as_metric().name().cmp(b.as_metric().name()));
+
+        // Check the NaN metric
+        let nan_metric = output[0].as_metric();
+        assert_eq!(nan_metric.name(), "test_metric_nan");
+        match nan_metric.value() {
+            MetricValue::Gauge { value } => {
+                assert!(value.is_nan());
+            }
+            _ => panic!("Expected gauge metric"),
+        }
+
+        // Check the valid metric
+        let valid_metric = output[1].as_metric();
+        assert_eq!(valid_metric.name(), "test_metric_valid");
+        assert_eq!(valid_metric.value(), &MetricValue::Gauge { value: 42.0 });
     }
 }
 
 #[cfg(all(test, feature = "prometheus-integration-tests"))]
 mod integration_tests {
-    use super::*;
-    use crate::{shutdown, test_util, Pipeline};
+    use std::net::{SocketAddr, ToSocketAddrs as _};
+
     use tokio::time::Duration;
 
-    const PROMETHEUS_RECEIVE_ADDRESS: &str = "127.0.0.1:9093";
+    use super::*;
+    use crate::test_util::components::{HTTP_PUSH_SOURCE_TAGS, run_and_assert_source_compliance};
+
+    fn source_receive_address() -> SocketAddr {
+        let address = std::env::var("REMOTE_WRITE_SOURCE_RECEIVE_ADDRESS")
+            .unwrap_or_else(|_| "127.0.0.1:9102".into());
+        // TODO: This logic should maybe be moved up into the source, and possibly into other
+        // sources, wrapped in a new socket address type that does the lookup during config parsing.
+        address
+            .to_socket_addrs()
+            .unwrap()
+            .next()
+            .unwrap_or_else(|| panic!("Socket address {address:?} did not resolve"))
+    }
 
     #[tokio::test]
     async fn receive_something() {
+        // TODO: This test depends on the single instance of Prometheus that we spin up for
+        // integration tests both scraping an endpoint and then also remote writing that stuff to
+        // this remote write source.  This makes sense from a "test the actual behavior" standpoint
+        // but it feels a little fragile.
+        //
+        // It could be nice to split up the Prometheus integration tests in the future, or
+        // maybe there's a way to do a one-shot remote write from Prometheus? Not sure.
         let config = PrometheusRemoteWriteConfig {
-            address: PROMETHEUS_RECEIVE_ADDRESS.parse().unwrap(),
+            address: source_receive_address(),
             auth: None,
             tls: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            skip_nan_values: false,
         };
 
-        let (tx, rx) = Pipeline::new_test();
-        let source = config
-            .build(
-                "prometheus_remote_write",
-                &GlobalOptions::default(),
-                shutdown::ShutdownSignal::noop(),
-                tx,
-            )
-            .await
-            .unwrap();
-
-        tokio::spawn(source);
-
-        tokio::time::delay_for(Duration::from_secs(2)).await;
-
-        let events = test_util::collect_ready(rx).await;
+        let events = run_and_assert_source_compliance(
+            config,
+            Duration::from_secs(5),
+            &HTTP_PUSH_SOURCE_TAGS,
+        )
+        .await;
         assert!(!events.is_empty());
     }
 }
